@@ -13,6 +13,9 @@ const errorHandler   = require('./middleware/errorHandler');
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
+const uploadRoutes = require('./routes/upload');
+app.use('/api/listings', uploadRoutes);
+
 // ── Security & parsing ────────────────────────────────────────
 app.use(helmet());
 app.use(cors({
