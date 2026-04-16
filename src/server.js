@@ -16,6 +16,9 @@ const PORT = process.env.PORT || 3000;
 const uploadRoutes = require('./routes/upload');
 app.use('/api/listings', uploadRoutes);
 
+const tokenRoutes = require('./routes/tokens');
+app.use('/api/tokens', tokenRoutes);
+
 // ── Security & parsing ────────────────────────────────────────
 app.use(helmet());
 app.use(cors({
