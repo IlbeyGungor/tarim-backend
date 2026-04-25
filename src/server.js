@@ -14,22 +14,22 @@ const app  = express();
 const PORT = process.env.PORT || 3000;
 
 const uploadRoutes = require('./routes/upload');
-app.use('/api/listings', uploadRoutes);
-
 const tokenRoutes = require('./routes/tokens');
-app.use('/api/tokens', tokenRoutes);
 
-// ── Security & parsing ────────────────────────────────────────
+// Security & parsing
 app.use(helmet());
 app.use(cors({
   origin: process.env.NODE_ENV === 'production'
-    ? ['https://yourapp.com']       // replace with your domain
+    ? ['https://yourapp.com']
     : '*',
   methods: ['GET','POST','PATCH','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization'],
 }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+app.use('/api/listings', uploadRoutes);
+app.use('/api/tokens', tokenRoutes);
 
 // Serve uploaded files
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
