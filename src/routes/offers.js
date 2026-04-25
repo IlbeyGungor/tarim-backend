@@ -74,15 +74,36 @@ router.post('/', authMiddleware, [
     await client.query('COMMIT');
 
     // Notify seller — after commit so DB is consistent
-    notify.newOffer({
-      sellerId:      listing.seller_id,
-      buyerName:     buyerRows[0]?.name || 'Bir alıcı',
-      cropName:      listing.crop_name,
-      offeredPrice:  offered_price,
-      unit:          listing.unit,
-      offerId:       rows[0].id,
-      listingId:     listing_id,
+    // Notify seller — after commit so DB is consistent
+    console.log('🚨 offer created, about to call notify.newOffer', {
+      sellerId: listing.seller_id,
+      buyerName: buyerRows[0]?.name || 'Bir alıcı',
+      cropName: listing.crop_name,
+      offeredPrice: offered_price,
+      unit: listing.unit,
+      offerId: rows[0].id,
+      listingId: listing_id,
     });
+
+    Promise.resolve(
+      notify.newOffer({
+        sellerId:      listing.seller_id,
+        buyerName:     buyerRows[0]?.name || 'Bir alıcı',
+        cropName:      listing.crop_name,
+        offeredPrice:  offered_price,
+        unit:          listing.unit,
+        offerId:       rows[0].id,
+        listingId:     listing_id,
+      })
+    )
+      .then(() => {
+        console.log('🚨 notify.newOffer resolved successfully');
+      })
+      .catch((err) => {
+        console.error('🚨 notify.newOffer failed', err);
+      });
+
+    console.log('🚨 notify.newOffer invoked');
 
     res.status(201).json(rows[0]);
   } catch (err) { await client.query('ROLLBACK'); next(err); } finally { client.release(); }

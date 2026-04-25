@@ -33,15 +33,30 @@ initFirebase();
 // ── Core send function ──────────────────────────────────────────────────────
 
 async function sendToUser(userId, { title, body, data = {} }) {
-  if (!initialized) return;
+  if (!initialized) {
+    console.log('🚨 sendToUser skipped: firebase not initialized');
+    return;
+  }
 
   try {
+    console.log('🚨 sendToUser called', { userId, title, body, data });
+
     // Get all device tokens for this user
     const { rows } = await query(
       'SELECT token FROM device_tokens WHERE user_id=$1',
       [userId]
     );
-    if (!rows.length) return;
+
+    console.log('🚨 tokens fetched', {
+      userId,
+      tokenCount: rows.length,
+      tokens: rows.map(r => r.token?.slice(0, 12)),
+    });
+
+    if (!rows.length) {
+      console.log('🚨 no tokens found for user');
+      return;
+    }
 
     const tokens = rows.map(r => r.token);
 
@@ -59,7 +74,24 @@ async function sendToUser(userId, { title, body, data = {} }) {
       tokens,
     };
 
+    console.log('🚨 about to send push via firebase-admin', {
+      userId,
+      tokenCount: tokens.length,
+      tokenStarts: tokens.map(t => t?.slice(0, 12)),
+    });
+
     const response = await admin.messaging().sendEachForMulticast(message);
+
+    console.log('🚨 firebase-admin response', {
+      successCount: response.successCount,
+      failureCount: response.failureCount,
+      responses: response.responses.map((r, i) => ({
+        index: i,
+        success: r.success,
+        errorCode: r.error?.code,
+        errorMessage: r.error?.message,
+      })),
+    });
 
     // Clean up invalid tokens
     if (response.failureCount > 0) {
@@ -75,7 +107,13 @@ async function sendToUser(userId, { title, body, data = {} }) {
           }
         }
       });
+
       if (toDelete.length > 0) {
+        console.log('🚨 deleting invalid tokens', {
+          count: toDelete.length,
+          tokenStarts: toDelete.map(t => t?.slice(0, 12)),
+        });
+
         await query(
           'DELETE FROM device_tokens WHERE token = ANY($1)',
           [toDelete]
@@ -83,6 +121,7 @@ async function sendToUser(userId, { title, body, data = {} }) {
       }
     }
   } catch (err) {
+    console.log('🚨 push send failed', err);
     console.error('Push notification error:', err.message);
     // Never throw — notification failures should never break the main flow
   }
@@ -94,6 +133,16 @@ const notify = {
 
   // New offer received — notify seller
   async newOffer({ sellerId, buyerName, cropName, offeredPrice, unit, offerId, listingId }) {
+    console.log('🚨 notify.newOffer entered', {
+      sellerId,
+      buyerName,
+      cropName,
+      offeredPrice,
+      unit,
+      offerId,
+      listingId,
+    });
+
     await sendToUser(sellerId, {
       title: '🌾 Yeni Teklif Aldınız',
       body: `${buyerName}, "${cropName}" ilanınıza ₺${parseFloat(offeredPrice).toFixed(2)}/${unit} teklif etti.`,
