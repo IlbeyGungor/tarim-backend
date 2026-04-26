@@ -68,42 +68,19 @@ router.post('/', authMiddleware, [
 
     await client.query('UPDATE listings SET offer_count=offer_count+1 WHERE id=$1', [listing_id]);
 
-    // Get buyer name for notification
     const { rows: buyerRows } = await client.query('SELECT name FROM users WHERE id=$1', [req.user.id]);
 
     await client.query('COMMIT');
 
-    // Notify seller — after commit so DB is consistent
-    // Notify seller — after commit so DB is consistent
-    console.log('🚨 offer created, about to call notify.newOffer', {
-      sellerId: listing.seller_id,
-      buyerName: buyerRows[0]?.name || 'Bir alıcı',
-      cropName: listing.crop_name,
-      offeredPrice: offered_price,
-      unit: listing.unit,
-      offerId: rows[0].id,
-      listingId: listing_id,
+    notify.newOffer({
+      sellerId:      listing.seller_id,
+      buyerName:     buyerRows[0]?.name || 'Bir alıcı',
+      cropName:      listing.crop_name,
+      offeredPrice:  offered_price,
+      unit:          listing.unit,
+      offerId:       rows[0].id,
+      listingId:     listing_id,
     });
-
-    Promise.resolve(
-      notify.newOffer({
-        sellerId:      listing.seller_id,
-        buyerName:     buyerRows[0]?.name || 'Bir alıcı',
-        cropName:      listing.crop_name,
-        offeredPrice:  offered_price,
-        unit:          listing.unit,
-        offerId:       rows[0].id,
-        listingId:     listing_id,
-      })
-    )
-      .then(() => {
-        console.log('🚨 notify.newOffer resolved successfully');
-      })
-      .catch((err) => {
-        console.error('🚨 notify.newOffer failed', err);
-      });
-
-    console.log('🚨 notify.newOffer invoked');
 
     res.status(201).json(rows[0]);
   } catch (err) { await client.query('ROLLBACK'); next(err); } finally { client.release(); }
@@ -145,13 +122,32 @@ router.patch('/:id/respond', authMiddleware, [
 
     await client.query('COMMIT');
 
-    // Notify buyer based on what seller did
     if (status === 'accepted') {
-      notify.offerAccepted({ buyerId: offer.buyer_id, sellerName: offer.seller_name, cropName: offer.crop_name, offerId: req.params.id });
+      notify.offerAccepted({
+        buyerId: offer.buyer_id,
+        sellerName: offer.seller_name,
+        cropName: offer.crop_name,
+        offerId: req.params.id,
+        listingId: offer.listing_id,
+      });
     } else if (status === 'rejected') {
-      notify.offerRejected({ buyerId: offer.buyer_id, cropName: offer.crop_name, offerId: req.params.id });
+      notify.offerRejected({
+        buyerId: offer.buyer_id,
+        cropName: offer.crop_name,
+        offerId: req.params.id,
+        listingId: offer.listing_id,
+      });
     } else if (status === 'countered') {
-      notify.counterOffer({ recipientId: offer.buyer_id, senderName: offer.seller_name, cropName: offer.crop_name, counterPrice: counter_price, unit: offer.unit, offerId: req.params.id, madeBy: 'seller' });
+      notify.counterOffer({
+        recipientId: offer.buyer_id,
+        senderName: offer.seller_name,
+        cropName: offer.crop_name,
+        counterPrice: counter_price,
+        unit: offer.unit,
+        offerId: req.params.id,
+        madeBy: 'seller',
+        listingId: offer.listing_id,
+      });
     }
 
     res.json(rows[0]);
@@ -195,13 +191,31 @@ router.patch('/:id/buyer-respond', authMiddleware, [
 
     await client.query('COMMIT');
 
-    // Notify seller based on what buyer did
     if (status === 'accepted') {
-      notify.offerAccepted({ buyerId: offer.seller_id, sellerName: offer.buyer_name, cropName: offer.crop_name, offerId: req.params.id });
+      notify.offerAccepted({
+        buyerId: offer.seller_id,
+        sellerName: offer.buyer_name,
+        cropName: offer.crop_name,
+        offerId: req.params.id,
+        listingId: offer.listing_id,
+      });
     } else if (status === 'rejected') {
-      notify.offerRejected({ buyerId: offer.seller_id, cropName: offer.crop_name, offerId: req.params.id });
+      notify.offerRejected({
+        buyerId: offer.seller_id,
+        cropName: offer.crop_name,
+        offerId: req.params.id,
+        listingId: offer.listing_id,
+      });
     } else if (status === 'countered') {
-      notify.finalOffer({ sellerId: offer.seller_id, buyerName: offer.buyer_name, cropName: offer.crop_name, finalPrice: counter_price, unit: offer.unit, offerId: req.params.id });
+      notify.finalOffer({
+        sellerId: offer.seller_id,
+        buyerName: offer.buyer_name,
+        cropName: offer.crop_name,
+        finalPrice: counter_price,
+        unit: offer.unit,
+        offerId: req.params.id,
+        listingId: offer.listing_id,
+      });
     }
 
     res.json(rows[0]);
@@ -267,10 +281,15 @@ router.patch('/:id/cancel-counter', authMiddleware, async (req, res, next) => {
     );
     await client.query('COMMIT');
 
-    // Notify the other party that counter was withdrawn
     const recipientId = isSeller ? offer.buyer_id : offer.seller_id;
     const senderName  = isSeller ? offer.seller_name : offer.buyer_name;
-    notify.counterCancelled({ recipientId, senderName, cropName: offer.crop_name, offerId: req.params.id });
+    notify.counterCancelled({
+      recipientId,
+      senderName,
+      cropName: offer.crop_name,
+      offerId: req.params.id,
+      listingId: offer.listing_id,
+    });
 
     res.json(rows[0]);
   } catch (err) { await client.query('ROLLBACK'); next(err); } finally { client.release(); }

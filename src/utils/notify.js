@@ -1,13 +1,9 @@
 // src/utils/notify.js
 // Sends push notifications via Firebase Cloud Messaging (FCM)
-// Install: npm install firebase-admin
 
 const admin = require('firebase-admin');
 const { query } = require('../db');
 
-// Initialize Firebase Admin SDK once
-// You get serviceAccount JSON from Firebase Console →
-// Project Settings → Service Accounts → Generate new private key
 let initialized = false;
 
 function initFirebase() {
@@ -30,33 +26,15 @@ function initFirebase() {
 
 initFirebase();
 
-// ── Core send function ──────────────────────────────────────────────────────
-
 async function sendToUser(userId, { title, body, data = {} }) {
-  if (!initialized) {
-    console.log('🚨 sendToUser skipped: firebase not initialized');
-    return;
-  }
+  if (!initialized) return;
 
   try {
-    console.log('🚨 sendToUser called', { userId, title, body, data });
-
-    // Get all device tokens for this user
     const { rows } = await query(
       'SELECT token FROM device_tokens WHERE user_id=$1',
       [userId]
     );
-
-    console.log('🚨 tokens fetched', {
-      userId,
-      tokenCount: rows.length,
-      tokens: rows.map(r => r.token?.slice(0, 12)),
-    });
-
-    if (!rows.length) {
-      console.log('🚨 no tokens found for user');
-      return;
-    }
+    if (!rows.length) return;
 
     const tokens = rows.map(r => r.token);
 
@@ -74,26 +52,8 @@ async function sendToUser(userId, { title, body, data = {} }) {
       tokens,
     };
 
-    console.log('🚨 about to send push via firebase-admin', {
-      userId,
-      tokenCount: tokens.length,
-      tokenStarts: tokens.map(t => t?.slice(0, 12)),
-    });
-
     const response = await admin.messaging().sendEachForMulticast(message);
 
-    console.log('🚨 firebase-admin response', {
-      successCount: response.successCount,
-      failureCount: response.failureCount,
-      responses: response.responses.map((r, i) => ({
-        index: i,
-        success: r.success,
-        errorCode: r.error?.code,
-        errorMessage: r.error?.message,
-      })),
-    });
-
-    // Clean up invalid tokens
     if (response.failureCount > 0) {
       const toDelete = [];
       response.responses.forEach((resp, idx) => {
@@ -107,13 +67,7 @@ async function sendToUser(userId, { title, body, data = {} }) {
           }
         }
       });
-
       if (toDelete.length > 0) {
-        console.log('🚨 deleting invalid tokens', {
-          count: toDelete.length,
-          tokenStarts: toDelete.map(t => t?.slice(0, 12)),
-        });
-
         await query(
           'DELETE FROM device_tokens WHERE token = ANY($1)',
           [toDelete]
@@ -121,28 +75,12 @@ async function sendToUser(userId, { title, body, data = {} }) {
       }
     }
   } catch (err) {
-    console.log('🚨 push send failed', err);
     console.error('Push notification error:', err.message);
-    // Never throw — notification failures should never break the main flow
   }
 }
 
-// ── Notification templates ──────────────────────────────────────────────────
-
 const notify = {
-
-  // New offer received — notify seller
   async newOffer({ sellerId, buyerName, cropName, offeredPrice, unit, offerId, listingId }) {
-    console.log('🚨 notify.newOffer entered', {
-      sellerId,
-      buyerName,
-      cropName,
-      offeredPrice,
-      unit,
-      offerId,
-      listingId,
-    });
-
     await sendToUser(sellerId, {
       title: '🌾 Yeni Teklif Aldınız',
       body: `${buyerName}, "${cropName}" ilanınıza ₺${parseFloat(offeredPrice).toFixed(2)}/${unit} teklif etti.`,
@@ -150,49 +88,44 @@ const notify = {
     });
   },
 
-  // Offer accepted — notify buyer
-  async offerAccepted({ buyerId, sellerName, cropName, offerId }) {
+  async offerAccepted({ buyerId, sellerName, cropName, offerId, listingId }) {
     await sendToUser(buyerId, {
       title: '✅ Teklifiniz Kabul Edildi!',
       body: `${sellerName}, "${cropName}" için teklifinizi kabul etti. İletişime geçebilirsiniz.`,
-      data: { type: 'offer_accepted', offer_id: offerId },
+      data: { type: 'offer_accepted', offer_id: offerId, listing_id: listingId },
     });
   },
 
-  // Offer rejected — notify buyer
-  async offerRejected({ buyerId, cropName, offerId }) {
+  async offerRejected({ buyerId, cropName, offerId, listingId }) {
     await sendToUser(buyerId, {
       title: '❌ Teklifiniz Reddedildi',
       body: `"${cropName}" için verdiğiniz teklif reddedildi. Yeni bir teklif verebilirsiniz.`,
-      data: { type: 'offer_rejected', offer_id: offerId },
+      data: { type: 'offer_rejected', offer_id: offerId, listing_id: listingId },
     });
   },
 
-  // Counter offer — notify the other party
-  async counterOffer({ recipientId, senderName, cropName, counterPrice, unit, offerId, madeBy }) {
+  async counterOffer({ recipientId, senderName, cropName, counterPrice, unit, offerId, madeBy, listingId }) {
     const who = madeBy === 'seller' ? 'Satıcı' : 'Alıcı';
     await sendToUser(recipientId, {
       title: '🔄 Karşı Teklif Geldi',
       body: `${who} ${senderName}, "${cropName}" için ₺${parseFloat(counterPrice).toFixed(2)}/${unit} karşı teklif yaptı.`,
-      data: { type: 'counter_offer', offer_id: offerId },
+      data: { type: 'counter_offer', offer_id: offerId, listing_id: listingId },
     });
   },
 
-  // Buyer made a final offer — notify seller
-  async finalOffer({ sellerId, buyerName, cropName, finalPrice, unit, offerId }) {
+  async finalOffer({ sellerId, buyerName, cropName, finalPrice, unit, offerId, listingId }) {
     await sendToUser(sellerId, {
       title: '⚡ Son Teklif Geldi',
       body: `${buyerName}, "${cropName}" için son teklifini yaptı: ₺${parseFloat(finalPrice).toFixed(2)}/${unit}`,
-      data: { type: 'final_offer', offer_id: offerId },
+      data: { type: 'final_offer', offer_id: offerId, listing_id: listingId },
     });
   },
 
-  // Offer cancelled (counter withdrawn) — notify the other party
-  async counterCancelled({ recipientId, senderName, cropName, offerId }) {
+  async counterCancelled({ recipientId, senderName, cropName, offerId, listingId }) {
     await sendToUser(recipientId, {
       title: '↩️ Karşı Teklif Geri Alındı',
       body: `${senderName}, "${cropName}" için yaptığı karşı teklifi geri aldı. Yeni teklif beklenebilir.`,
-      data: { type: 'counter_cancelled', offer_id: offerId },
+      data: { type: 'counter_cancelled', offer_id: offerId, listing_id: listingId },
     });
   },
 };
