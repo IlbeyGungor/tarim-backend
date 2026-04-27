@@ -16,7 +16,7 @@ router.get('/my', authMiddleware, async (req, res, next) => {
       FROM offers o
       JOIN listings l ON l.id = o.listing_id
       JOIN users u ON u.id = l.seller_id
-      WHERE o.buyer_id = $1
+      WHERE o.buyer_id = $1 AND o.buyer_deleted_at IS NULL
       ORDER BY o.created_at DESC
     `, [req.user.id]);
     res.json(rows);
@@ -33,7 +33,7 @@ router.get('/received', authMiddleware, async (req, res, next) => {
       FROM offers o
       JOIN listings l ON l.id = o.listing_id
       JOIN users u ON u.id = o.buyer_id
-      WHERE l.seller_id = $1
+      WHERE l.seller_id = $1 AND o.seller_deleted_at IS NULL
       ORDER BY o.created_at DESC
     `, [req.user.id]);
     res.json(rows);
@@ -293,6 +293,110 @@ router.patch('/:id/cancel-counter', authMiddleware, async (req, res, next) => {
 
     res.json(rows[0]);
   } catch (err) { await client.query('ROLLBACK'); next(err); } finally { client.release(); }
+});
+
+
+router.delete('/:id', authMiddleware, async (req, res, next) => {
+  const client = await getClient();
+
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(`
+      SELECT
+        o.id,
+        o.status,
+        o.listing_id,
+        o.buyer_id,
+        o.buyer_deleted_at,
+        o.seller_deleted_at,
+        l.seller_id
+      FROM offers o
+      JOIN listings l ON l.id = o.listing_id
+      WHERE o.id = $1
+    `, [req.params.id]);
+
+    if (!rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Teklif bulunamadı.' });
+    }
+
+    const offer = rows[0];
+    const isBuyer = offer.buyer_id === req.user.id;
+    const isSeller = offer.seller_id === req.user.id;
+
+    if (!isBuyer && !isSeller) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Bu teklifi silme yetkiniz yok.' });
+    }
+
+    // accepted / countered / completed -> silinemez
+    if (['accepted', 'countered', 'completed'].includes(offer.status)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Bu durumdaki teklifler silinemez.' });
+    }
+
+    // pending -> sadece buyer silebilir, tamamen silinir
+    if (offer.status === 'pending') {
+      if (!isBuyer) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ error: 'Bekleyen teklifi sadece teklifi veren kullanıcı silebilir.' });
+      }
+
+      await client.query(`DELETE FROM offers WHERE id = $1`, [offer.id]);
+
+      await client.query(`
+        UPDATE listings
+        SET offer_count = GREATEST(offer_count - 1, 0)
+        WHERE id = $1
+      `, [offer.listing_id]);
+
+      await client.query('COMMIT');
+      return res.json({ message: 'Teklif tamamen silindi.', mode: 'hard' });
+    }
+
+    // rejected -> sadece o kullanıcı için gizlenir
+    if (offer.status === 'rejected') {
+      if (isBuyer) {
+        await client.query(`
+          UPDATE offers
+          SET buyer_deleted_at = COALESCE(buyer_deleted_at, NOW()),
+              updated_at = NOW()
+          WHERE id = $1
+        `, [offer.id]);
+      }
+
+      if (isSeller) {
+        await client.query(`
+          UPDATE offers
+          SET seller_deleted_at = COALESCE(seller_deleted_at, NOW()),
+              updated_at = NOW()
+          WHERE id = $1
+        `, [offer.id]);
+      }
+
+      // İki taraf da sildiyse DB'den tamamen temizle
+      await client.query(`
+        DELETE FROM offers
+        WHERE id = $1
+          AND status = 'rejected'
+          AND buyer_deleted_at IS NOT NULL
+          AND seller_deleted_at IS NOT NULL
+      `, [offer.id]);
+
+      await client.query('COMMIT');
+      return res.json({ message: 'Teklif listenizden kaldırıldı.', mode: 'soft' });
+    }
+
+    await client.query('ROLLBACK');
+    return res.status(400).json({ error: 'Bu teklif silinemez.' });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
 });
 
 // GET /api/offers/:id/messages

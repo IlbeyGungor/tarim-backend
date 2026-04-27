@@ -68,6 +68,8 @@ const migrate = async () => {
         status          VARCHAR(20)  NOT NULL CHECK (status IN ('pending','accepted','rejected','countered','completed')) DEFAULT 'pending',
         counter_price   NUMERIC(10,2),
         counter_by      VARCHAR(20) CHECK (counter_by IN ('seller','buyer')),
+        buyer_deleted_at TIMESTAMPTZ,
+        seller_deleted_at TIMESTAMPTZ,
         created_at      TIMESTAMPTZ DEFAULT NOW(),
         updated_at      TIMESTAMPTZ DEFAULT NOW()
       )
