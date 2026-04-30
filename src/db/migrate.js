@@ -104,6 +104,44 @@ const migrate = async () => {
       )
     `);
 
+    // ── market_price_history ──────────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS market_price_history (
+        id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        product     VARCHAR(100) NOT NULL,
+        market      VARCHAR(120) NOT NULL,
+        city        VARCHAR(80)  NOT NULL,
+        icon        VARCHAR(10),
+        min_price   NUMERIC(10,2) NOT NULL,
+        max_price   NUMERIC(10,2) NOT NULL,
+        avg_price   NUMERIC(10,2) NOT NULL,
+        unit        VARCHAR(20)  NOT NULL DEFAULT 'kg',
+        price_date  DATE NOT NULL,
+        created_at  TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (product, market, city, price_date)
+      )
+    `);
+
+    // ── market_price_latest ───────────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS market_price_latest (
+        id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        product          VARCHAR(100) NOT NULL,
+        market           VARCHAR(120) NOT NULL,
+        city             VARCHAR(80)  NOT NULL,
+        icon             VARCHAR(10),
+        min_price        NUMERIC(10,2) NOT NULL,
+        max_price        NUMERIC(10,2) NOT NULL,
+        avg_price        NUMERIC(10,2) NOT NULL,
+        unit             VARCHAR(20)  NOT NULL DEFAULT 'kg',
+        latest_price_date DATE NOT NULL,
+        prev_price_date  DATE,
+        trend            NUMERIC(10,4) DEFAULT 0,
+        updated_at       TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (product, market, city)
+      )
+    `);
+
     // ── Indexes ────────────────────────────────────────────────
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_seller     ON listings(seller_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_city       ON listings(city)`);
@@ -112,6 +150,20 @@ const migrate = async () => {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_offers_listing      ON offers(listing_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_offers_buyer        ON offers(buyer_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_offer      ON messages(offer_id)`);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_market_price_history_lookup
+      ON market_price_history(product, market, city, price_date DESC)
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_market_price_latest_lookup
+      ON market_price_latest(product, market, city)
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_market_price_latest_date
+      ON market_price_latest(latest_price_date DESC)
+    `);
 
     await client.query('COMMIT');
     console.log('✅  Migration complete — all tables created');

@@ -4,19 +4,77 @@ const { query, getClient } = require('../db');
 const authMiddleware = require('../middleware/auth');
 
 // GET /api/prices  (public)
+// Ana liste için: her ürün + hal kombinasyonunun son mümkün fiyatı
 pricesRouter.get('/', async (req, res, next) => {
   try {
-    const { rows } = await query(
-      `SELECT * FROM market_prices WHERE price_date = CURRENT_DATE ORDER BY product ASC`
-    );
-    if (!rows.length) {
-      const { rows: latest } = await query(
-        `SELECT DISTINCT ON (product) * FROM market_prices ORDER BY product, price_date DESC`
-      );
-      return res.json(latest);
-    }
+    const { rows } = await query(`
+      SELECT
+        product,
+        market,
+        city,
+        icon,
+        min_price,
+        max_price,
+        avg_price,
+        unit,
+        trend,
+        latest_price_date
+      FROM market_price_latest
+      ORDER BY product ASC, city ASC, market ASC
+    `);
+
     res.json(rows);
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/prices/history?product=Mayer%20Limon&city=Mersin&market=Mersin%20Hali&range=30d
+pricesRouter.get('/history', async (req, res, next) => {
+  try {
+    const { product, city, market, range = '30d' } = req.query;
+
+    if (!product || !city || !market) {
+      return res.status(400).json({
+        error: 'product, city ve market parametreleri zorunludur.'
+      });
+    }
+
+    let days;
+    switch (range) {
+      case '7d':
+        days = 7;
+        break;
+      case '30d':
+        days = 30;
+        break;
+      case '365d':
+        days = 365;
+        break;
+      default:
+        return res.status(400).json({
+          error: 'range sadece 7d, 30d veya 365d olabilir.'
+        });
+    }
+
+    const { rows } = await query(`
+      SELECT
+        price_date,
+        min_price,
+        max_price,
+        avg_price
+      FROM market_price_history
+      WHERE product = $1
+        AND city = $2
+        AND market = $3
+        AND price_date >= CURRENT_DATE - ($4::int * INTERVAL '1 day')
+      ORDER BY price_date ASC
+    `, [product, city, market, days]);
+
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
 });
 
 // ── Users ──────────────────────────────────────────────────────────────────
