@@ -107,18 +107,19 @@ const migrate = async () => {
     // ── market_price_history ──────────────────────────────────
     await client.query(`
       CREATE TABLE IF NOT EXISTS market_price_history (
-        id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-        product     VARCHAR(100) NOT NULL,
-        market      VARCHAR(120) NOT NULL,
-        city        VARCHAR(80)  NOT NULL,
-        icon        VARCHAR(10),
-        min_price   NUMERIC(10,2) NOT NULL,
-        max_price   NUMERIC(10,2) NOT NULL,
-        avg_price   NUMERIC(10,2) NOT NULL,
-        unit        VARCHAR(20)  NOT NULL DEFAULT 'kg',
-        price_date  DATE NOT NULL,
-        created_at  TIMESTAMPTZ DEFAULT NOW(),
-        UNIQUE (product, market, city, price_date)
+        id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        product          VARCHAR(100) NOT NULL,
+        market           VARCHAR(120) NOT NULL,
+        city             VARCHAR(80)  NOT NULL,
+        production_type  VARCHAR(80)  NOT NULL,
+        icon             VARCHAR(10),
+        min_price        NUMERIC(10,2),
+        max_price        NUMERIC(10,2),
+        avg_price        NUMERIC(10,2) NOT NULL,
+        unit             VARCHAR(20)  NOT NULL DEFAULT 'kg',
+        price_date       DATE NOT NULL,
+        created_at       TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (product, market, city, production_type ,price_date)
       )
     `);
 
@@ -129,16 +130,17 @@ const migrate = async () => {
         product          VARCHAR(100) NOT NULL,
         market           VARCHAR(120) NOT NULL,
         city             VARCHAR(80)  NOT NULL,
+        production_type  VARCHAR(80)  NOT NULL,
         icon             VARCHAR(10),
-        min_price        NUMERIC(10,2) NOT NULL,
-        max_price        NUMERIC(10,2) NOT NULL,
+        min_price        NUMERIC(10,2),
+        max_price        NUMERIC(10,2),
         avg_price        NUMERIC(10,2) NOT NULL,
         unit             VARCHAR(20)  NOT NULL DEFAULT 'kg',
         latest_price_date DATE NOT NULL,
         prev_price_date  DATE,
         trend            NUMERIC(10,4) DEFAULT 0,
         updated_at       TIMESTAMPTZ DEFAULT NOW(),
-        UNIQUE (product, market, city)
+        UNIQUE (product, market, city, production_type)
       )
     `);
 
