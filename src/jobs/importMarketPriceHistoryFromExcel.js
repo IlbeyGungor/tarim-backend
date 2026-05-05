@@ -103,7 +103,7 @@ async function run() {
       const unit = normalizeText(row.unit || 'kg');
       const priceDate = normalizeDate(row.price_date);
 
-      if (!product || !scope || !market || !city || !productionType || !unit || !priceDate) {
+      if (!product || !scope || !market || !city || !unit || !priceDate) {
         console.log('Skipping invalid row:', row);
         continue;
       }
@@ -113,7 +113,7 @@ async function run() {
         continue;
       }
 
-      if (minPrice == null || maxPrice == null || avgPrice == null) {
+      if ( avgPrice == null) {
         console.log('Skipping row with invalid prices:', row);
         continue;
       }
