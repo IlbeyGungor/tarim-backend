@@ -88,6 +88,9 @@ async function run() {
   const sheet = workbook.Sheets[sheetName];
   const rows = XLSX.utils.sheet_to_json(sheet, { defval: null });
 
+  const client = await pool.connect();
+  console.log('✅ DB connection established');
+
   console.log(`📊 Toplam satır: ${rows.length}`);
 
   const validRows = [];
@@ -166,7 +169,6 @@ async function run() {
     process.exit(1);
   }
 
-  const client = await pool.connect();
 
   try {
     const batchSize = 1000;

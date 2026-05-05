@@ -14,7 +14,7 @@ const pool = connectionString
       ssl: { rejectUnauthorized: false },
       max: 20,
       idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 2000,
+      connectionTimeoutMillis: 60000,
     })
   : new Pool({
       host: process.env.DB_HOST || 'localhost',
@@ -24,7 +24,7 @@ const pool = connectionString
       password: process.env.DB_PASSWORD || 'password',
       max: 20,
       idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 2000,
+      connectionTimeoutMillis: 60000,
     });
 
 pool.on('error', (err) => {
