@@ -4,6 +4,15 @@ const { pool } = require('./index');
 const migrate = async () => {
   const client = await pool.connect();
   try {
+
+    const dbInfo = await client.query(`
+  SELECT
+    current_database() AS db,
+    inet_server_addr() AS host,
+    inet_server_port() AS port,
+    current_user AS user
+`);
+console.log('DB INFO:', dbInfo.rows[0]);
     await client.query('BEGIN');
 
     // Enable UUID extension
