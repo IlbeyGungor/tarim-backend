@@ -169,6 +169,25 @@ async function run() {
     process.exit(1);
   }
 
+  const dedupedMap = new Map();
+
+  for (const row of validRows) {
+    const key = [
+      row.product,
+      row.market,
+      row.city,
+      row.productionType,
+      row.priceDate
+    ].join('||');
+
+    dedupedMap.set(key, row);
+  }
+
+  const dedupedRows = Array.from(dedupedMap.values());
+
+  console.log(`🧹 Duplicate temizliği sonrası satır: ${dedupedRows.length}`);
+  console.log(`🗑️ Temizlenen duplicate sayısı: ${validRows.length - dedupedRows.length}`);  
+
 
   try {
     const batchSize = 1000;
