@@ -3,7 +3,7 @@ const XLSX = require('xlsx');
 const { pool } = require('../db');
 
 function normalizeText(value) {
-  return String(value || '').trim();
+  return String(value ?? '').trim();
 }
 
 function normalizeNumber(value) {
@@ -28,13 +28,15 @@ function normalizeDate(value) {
 
   const str = String(value).trim();
 
+  // yyyy-mm-dd
   if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
 
-  const parts = str.split(/[./-]/);
+  // dd.mm.yyyy / dd-mm-yyyy / dd/mm/yyyy
+  const parts = str.split(/[.\-/]/);
   if (parts.length === 3) {
-    const [a, b, c] = parts;
-    if (c.length === 4) {
-      return `${c}-${b.padStart(2, '0')}-${a.padStart(2, '0')}`;
+    const [day, month, year] = parts;
+    if (year.length === 4) {
+      return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
     }
   }
 
@@ -47,9 +49,10 @@ function normalizeDate(value) {
 }
 
 function normalizeProductionType(value) {
-  const v = String(value || '').trim().toLowerCase();
+  const v = String(value ?? '').trim().toLowerCase();
 
   if (
+    v === '' ||
     v === 'geleneksel' ||
     v === 'geleneksel (konvansiyonel)' ||
     v === 'konvansiyonel'
@@ -57,72 +60,150 @@ function normalizeProductionType(value) {
     return 'Geleneksel';
   }
 
-  if (
-    v === 'iyi tarım' ||
-    v === 'iyi tarim'
-  ) {
+  if (v === 'iyi tarım' || v === 'iyi tarim') {
     return 'İyi Tarım';
   }
 
-  if (
-    v === 'organik' ||
-    v === 'organik tarım' ||
-    v === 'organik tarim'
-  ) {
+  if (v === 'organik' || v === 'organik tarım' || v === 'organik tarim') {
     return 'Organik Tarım';
   }
 
-  return null;
+  return 'Geleneksel';
+}
+
+function chunkArray(arr, size) {
+  const chunks = [];
+  for (let i = 0; i < arr.length; i += size) {
+    chunks.push(arr.slice(i, i + size));
+  }
+  return chunks;
 }
 
 async function run() {
   const filePath = path.resolve(process.cwd(), 'data', 'market_price_history.xlsx');
+  console.log('📘 Excel okunuyor:', filePath);
+
   const workbook = XLSX.readFile(filePath);
   const sheetName = workbook.SheetNames[0];
   const sheet = workbook.Sheets[sheetName];
   const rows = XLSX.utils.sheet_to_json(sheet, { defval: null });
 
+  console.log(`📊 Toplam satır: ${rows.length}`);
+
+  const validRows = [];
+  let skippedCount = 0;
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+
+    const product = normalizeText(row.product);
+    const scope = normalizeText(row.scope || 'market').toLowerCase();
+    const market = normalizeText(row.market);
+    const city = normalizeText(row.city);
+    const productionType = normalizeProductionType(row.production_type);
+    const icon = normalizeText(row.icon || '');
+
+    let minPrice = normalizeNumber(row.min_price);
+    let maxPrice = normalizeNumber(row.max_price);
+    const avgPrice = normalizeNumber(row.avg_price);
+
+    const unit = normalizeText(row.unit || 'kg');
+    const priceDate = normalizeDate(row.price_date);
+
+    if (!product || !scope || !market || !city || !productionType || !unit || !priceDate) {
+      skippedCount++;
+      if (skippedCount <= 20) {
+        console.log('⚠️ Skipping invalid row:', row);
+      }
+      continue;
+    }
+
+    if (!['market', 'national'].includes(scope)) {
+      skippedCount++;
+      if (skippedCount <= 20) {
+        console.log('⚠️ Skipping row with invalid scope:', row);
+      }
+      continue;
+    }
+
+    // avg_price zorunlu
+    if (avgPrice == null) {
+      skippedCount++;
+      if (skippedCount <= 20) {
+        console.log('⚠️ Skipping row with invalid avg_price:', row);
+      }
+      continue;
+    }
+
+    // Türkiye verisinde min/max yoksa null bırak
+    if (minPrice == null) minPrice = null;
+    if (maxPrice == null) maxPrice = null;
+
+    validRows.push({
+      product,
+      scope,
+      market,
+      city,
+      productionType,
+      icon: icon || null,
+      minPrice,
+      maxPrice,
+      avgPrice,
+      unit,
+      priceDate
+    });
+
+    if ((i + 1) % 10000 === 0) {
+      console.log(`🔄 Normalize edilen satır: ${i + 1}/${rows.length}`);
+    }
+  }
+
+  console.log(`✅ Geçerli satır: ${validRows.length}`);
+  console.log(`⏭️ Atlanan satır: ${skippedCount}`);
+
+  if (!validRows.length) {
+    console.log('❌ Import edilecek geçerli satır yok.');
+    process.exit(1);
+  }
+
   const client = await pool.connect();
 
   try {
-    await client.query('BEGIN');
+    const batchSize = 1000;
+    const batches = chunkArray(validRows, batchSize);
 
-    for (const row of rows) {
-      const product = normalizeText(row.product);
-      const scope = normalizeText(row.scope || 'market').toLowerCase();
-      const market = normalizeText(row.market);
-      const city = normalizeText(row.city);
-      const productionType = normalizeProductionType(row.production_type);
-      const icon = normalizeText(row.icon || '');
-      const minPrice = normalizeNumber(row.min_price);
-      const maxPrice = normalizeNumber(row.max_price);
-      const avgPrice = normalizeNumber(row.avg_price) ??
-        (minPrice != null && maxPrice != null
-          ? Number(((minPrice + maxPrice) / 2).toFixed(2))
-          : null);
-      const unit = normalizeText(row.unit || 'kg');
-      const priceDate = normalizeDate(row.price_date);
+    console.log(`📦 Batch sayısı: ${batches.length} (batch size: ${batchSize})`);
 
-      if (!product || !scope || !market || !city || !unit || !priceDate) {
-        console.log('Skipping invalid row:', row);
-        continue;
-      }
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
 
-      if (!['market', 'national'].includes(scope)) {
-        console.log('Skipping row with invalid scope:', row);
-        continue;
-      }
+      const placeholders = batch
+        .map((_, rowIndex) => {
+          const base = rowIndex * 11;
+          return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11})`;
+        })
+        .join(', ');
 
-      if ( avgPrice == null) {
-        console.log('Skipping row with invalid prices:', row);
-        continue;
-      }
+      const values = batch.flatMap(row => [
+        row.product,
+        row.scope,
+        row.market,
+        row.city,
+        row.productionType,
+        row.icon,
+        row.minPrice,
+        row.maxPrice,
+        row.avgPrice,
+        row.unit,
+        row.priceDate
+      ]);
 
-      await client.query(`
+      await client.query(
+        `
         INSERT INTO market_price_history
           (product, scope, market, city, production_type, icon, min_price, max_price, avg_price, unit, price_date)
         VALUES
-          ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+          ${placeholders}
         ON CONFLICT (product, market, city, production_type, price_date)
         DO UPDATE SET
           scope = EXCLUDED.scope,
@@ -131,25 +212,15 @@ async function run() {
           max_price = EXCLUDED.max_price,
           avg_price = EXCLUDED.avg_price,
           unit = EXCLUDED.unit
-      `, [
-        product,
-        scope,
-        market,
-        city,
-        productionType,
-        icon || null,
-        minPrice,
-        maxPrice,
-        avgPrice,
-        unit,
-        priceDate
-      ]);
+        `,
+        values
+      );
+
+      console.log(`✅ Batch ${i + 1}/${batches.length} tamamlandı (${batch.length} satır)`);
     }
 
-    await client.query('COMMIT');
-    console.log(`✅ Excel verileri market_price_history tablosuna aktarıldı. Satır sayısı: ${rows.length}`);
+    console.log(`🎉 Import tamamlandı. Toplam import edilen/geçilen satır: ${validRows.length}`);
   } catch (err) {
-    await client.query('ROLLBACK');
     console.error('❌ Import failed:', err);
     process.exit(1);
   } finally {
