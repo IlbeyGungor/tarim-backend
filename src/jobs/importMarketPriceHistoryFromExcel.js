@@ -9,27 +9,69 @@ function normalizeText(value) {
 function normalizeNumber(value) {
   if (value === null || value === undefined || value === '') return null;
 
-  const cleaned = String(value)
-    .replace(/[₺TLtl\s]/g, '')
-    .replace(/\./g, '')
-    .replace(',', '.')
-    .trim();
+  // Excel hücresi gerçekten number ise direkt kullan
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Number(value.toFixed(2));
+  }
 
-  const num = Number(cleaned);
-  return Number.isFinite(num) ? num : null;
+  let str = String(value).trim();
+
+  if (!str) return null;
+
+  // Para birimi / boşluk temizliği
+  str = str.replace(/[₺TLtl\s]/g, '');
+
+  // Türkçe sayı formatı: 1.234,56
+  if (str.includes(',') && str.includes('.')) {
+    str = str.replace(/\./g, '').replace(',', '.');
+  }
+  // Sadece virgül varsa: 123,45
+  else if (str.includes(',')) {
+    str = str.replace(',', '.');
+  }
+  // Sadece nokta varsa olduğu gibi bırak: 1234.56
+
+  const num = Number(str);
+  return Number.isFinite(num) ? Number(num.toFixed(2)) : null;
 }
 
 function normalizeDate(value) {
-  if (!value) return null;
+  if (value == null || value === '') return null;
 
-  if (value instanceof Date) {
+  // Excel true date hücresi -> JS Date
+  if (value instanceof Date && !isNaN(value.getTime())) {
     return value.toISOString().slice(0, 10);
+  }
+
+  // Excel serial number -> date
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const excelEpoch = new Date(Date.UTC(1899, 11, 30));
+    const jsDate = new Date(excelEpoch.getTime() + value * 86400000);
+
+    if (!isNaN(jsDate.getTime())) {
+      return jsDate.toISOString().slice(0, 10);
+    }
+    return null;
   }
 
   const str = String(value).trim();
 
+  // String olarak gelen Excel serial
+  if (/^\d{5}(\.\d+)?$/.test(str)) {
+    const serial = Number(str);
+    const excelEpoch = new Date(Date.UTC(1899, 11, 30));
+    const jsDate = new Date(excelEpoch.getTime() + serial * 86400000);
+
+    if (!isNaN(jsDate.getTime())) {
+      return jsDate.toISOString().slice(0, 10);
+    }
+    return null;
+  }
+
   // yyyy-mm-dd
-  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+    return str;
+  }
 
   // dd.mm.yyyy / dd-mm-yyyy / dd/mm/yyyy
   const parts = str.split(/[.\-/]/);
@@ -38,11 +80,6 @@ function normalizeDate(value) {
     if (year.length === 4) {
       return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
     }
-  }
-
-  const parsed = new Date(str);
-  if (!isNaN(parsed.getTime())) {
-    return parsed.toISOString().slice(0, 10);
   }
 
   return null;
@@ -83,7 +120,7 @@ async function run() {
   const filePath = path.resolve(process.cwd(), 'data', 'market_price_history.xlsx');
   console.log('📘 Excel okunuyor:', filePath);
 
-  const workbook = XLSX.readFile(filePath);
+  const workbook = XLSX.readFile(filePath, { cellDates: true });
   const sheetName = workbook.SheetNames[0];
   const sheet = workbook.Sheets[sheetName];
   const rows = XLSX.utils.sheet_to_json(sheet, { defval: null });
@@ -114,12 +151,22 @@ async function run() {
     const priceDate = normalizeDate(row.price_date);
 
     if (!product || !scope || !market || !city || !productionType || !unit || !priceDate) {
-      skippedCount++;
-      if (skippedCount <= 20) {
-        console.log('⚠️ Skipping invalid row:', row);
-      }
-      continue;
-    }
+  skippedCount++;
+  if (skippedCount <= 50) {
+    console.log('⚠️ Skipping invalid row:', {
+      product,
+      scope,
+      market,
+      city,
+      productionType,
+      unit,
+      rawPriceDate: row.price_date,
+      normalizedPriceDate: priceDate,
+      row
+    });
+  }
+  continue;
+}
 
     if (!['market', 'national'].includes(scope)) {
       skippedCount++;
@@ -134,6 +181,22 @@ async function run() {
       skippedCount++;
       if (skippedCount <= 20) {
         console.log('⚠️ Skipping row with invalid avg_price:', row);
+      }
+      continue;
+    }
+
+    const tooLarge =
+      (minPrice != null && Math.abs(minPrice) >= 100000000) ||
+      (maxPrice != null && Math.abs(maxPrice) >= 100000000) ||
+      (avgPrice != null && Math.abs(avgPrice) >= 100000000);
+
+    if (tooLarge) {
+      skippedCount++;
+      if (skippedCount <= 50) {
+        console.log('⚠️ Skipping row with overflow-sized number:', {
+          rawRow: row,
+          parsed: { minPrice, maxPrice, avgPrice }
+        });
       }
       continue;
     }
@@ -191,7 +254,7 @@ async function run() {
 
   try {
     const batchSize = 1000;
-    const batches = chunkArray(validRows, batchSize);
+    const batches = chunkArray(dedupedRows, batchSize);
 
     console.log(`📦 Batch sayısı: ${batches.length} (batch size: ${batchSize})`);
 
