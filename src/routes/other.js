@@ -7,11 +7,17 @@ const authMiddleware = require('../middleware/auth');
 // Ana liste için: her ürün + hal kombinasyonunun son mümkün fiyatı
 pricesRouter.get('/', async (req, res, next) => {
   try {
+    const scope = req.query.scope || 'national';
+    const productionType = req.query.production_type || 'Geleneksel';
+
     const { rows } = await query(`
       SELECT
+        id,
         product,
+        scope,
         market,
         city,
+        production_type,
         icon,
         min_price,
         max_price,
@@ -20,8 +26,10 @@ pricesRouter.get('/', async (req, res, next) => {
         trend,
         latest_price_date
       FROM market_price_latest
-      ORDER BY product ASC, city ASC, market ASC
-    `);
+      WHERE scope = $1
+        AND production_type = $2
+      ORDER BY product ASC
+    `, [scope, productionType]);
 
     res.json(rows);
   } catch (err) {
