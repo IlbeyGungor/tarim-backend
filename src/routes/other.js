@@ -7,12 +7,66 @@ const authMiddleware = require('../middleware/auth');
 // Ana liste için: her ürün + hal kombinasyonunun son mümkün fiyatı
 pricesRouter.get('/', async (req, res, next) => {
   try {
-    const scope = req.query.scope || 'national';
-    const productionType = req.query.production_type || 'Geleneksel';
+    const scope = String(req.query.scope || 'national').trim();
+    const productionType = String(req.query.production_type || 'Geleneksel').trim();
+
+    const search = String(req.query.search || '').trim();
+    const city = String(req.query.city || '').trim();
+    const product = String(req.query.product || '').trim();
+
+    const params = [];
+    const conditions = [];
+    let i = 1;
+
+    conditions.push(`production_type = $${i}`);
+    params.push(productionType);
+    i++;
+
+    conditions.push(`scope = $${i}`);
+    params.push(scope);
+    i++;
+
+    const hasSearch =
+      scope === 'national'
+        ? search.length > 0
+        : city.length > 0 || product.length > 0;
+
+    // İlk açılışta sadece icon'u olanlar gelsin.
+    // Arama yapılınca icon'u olmayanlar da arama sonucuna dahil olabilir.
+    if (!hasSearch) {
+      conditions.push(`icon IS NOT NULL`);
+      conditions.push(`TRIM(icon) <> ''`);
+    }
+
+    if (scope === 'national' && search) {
+      conditions.push(`
+        (
+          product ILIKE $${i}
+          OR city ILIKE $${i}
+          OR market ILIKE $${i}
+        )
+      `);
+      params.push(`%${search}%`);
+      i++;
+    }
+
+    if (scope === 'market') {
+      if (city) {
+        conditions.push(`city ILIKE $${i}`);
+        params.push(`%${city}%`);
+        i++;
+      }
+
+      if (product) {
+        conditions.push(`product ILIKE $${i}`);
+        params.push(`%${product}%`);
+        i++;
+      }
+    }
 
     const { rows } = await query(`
       SELECT
-        id,
+        id::text AS id,
         product,
         scope,
         market,
@@ -26,10 +80,18 @@ pricesRouter.get('/', async (req, res, next) => {
         trend,
         latest_price_date
       FROM market_price_latest
-      WHERE scope = $1
-        AND production_type = $2
-      ORDER BY product ASC
-    `, [scope, productionType]);
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY
+        CASE
+          WHEN icon IS NULL OR TRIM(icon) = '' THEN 1
+          ELSE 0
+        END,
+        icon ASC,
+        product ASC,
+        city ASC,
+        market ASC
+      LIMIT 300
+    `, params);
 
     res.json(rows);
   } catch (err) {
