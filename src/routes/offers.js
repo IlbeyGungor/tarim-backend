@@ -16,7 +16,9 @@ router.get('/my', authMiddleware, async (req, res, next) => {
       FROM offers o
       JOIN listings l ON l.id = o.listing_id
       JOIN users u ON u.id = l.seller_id
-      WHERE o.buyer_id = $1 AND o.buyer_deleted_at IS NULL
+      WHERE o.buyer_id = $1
+        AND o.buyer_deleted_at IS NULL
+        AND (l.status <> 'reserved' OR o.status = 'accepted')
       ORDER BY o.created_at DESC
     `, [req.user.id]);
     res.json(rows);
@@ -57,9 +59,15 @@ router.post('/', authMiddleware, [
       "SELECT l.*, u.name AS seller_name FROM listings l JOIN users u ON u.id=l.seller_id WHERE l.id=$1 AND l.status='active'",
       [listing_id]
     );
-    if (!listingRows.length) return res.status(404).json({ error: 'Aktif ilan bulunamadı.' });
+    if (!listingRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Aktif ilan bulunamadı.' });
+    }
     const listing = listingRows[0];
-    if (listing.seller_id === req.user.id) return res.status(400).json({ error: 'Kendi ilanınıza teklif veremezsiniz.' });
+    if (listing.seller_id === req.user.id) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Kendi ilanınıza teklif veremezsiniz.' });
+    }
 
     const { rows } = await client.query(`
       INSERT INTO offers (listing_id,buyer_id,offered_price,quantity,message)
@@ -98,17 +106,28 @@ router.patch('/:id/respond', authMiddleware, [
     const { status, counter_price } = req.body;
 
     const { rows: offerRows } = await client.query(`
-      SELECT o.*, l.seller_id, l.crop_name, l.unit,
+      SELECT o.*, l.seller_id, l.crop_name, l.unit, l.status AS listing_status,
              buyer.name AS buyer_name, seller.name AS seller_name
       FROM offers o
       JOIN listings l ON l.id=o.listing_id
       JOIN users buyer ON buyer.id=o.buyer_id
       JOIN users seller ON seller.id=l.seller_id
       WHERE o.id=$1
+      FOR UPDATE OF o, l
     `, [req.params.id]);
-    if (!offerRows.length) return res.status(404).json({ error: 'Teklif bulunamadı.' });
+    if (!offerRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Teklif bulunamadı.' });
+    }
     const offer = offerRows[0];
-    if (offer.seller_id !== req.user.id) return res.status(403).json({ error: 'Yetki yok.' });
+    if (offer.seller_id !== req.user.id) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Yetki yok.' });
+    }
+    if (status === 'accepted' && offer.listing_status !== 'active') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Bu ilan artık teklif kabul etmeye uygun değil.' });
+    }
 
     const counterBy = status === 'countered' ? 'seller' : null;
     const { rows } = await client.query(`
@@ -117,7 +136,21 @@ router.patch('/:id/respond', authMiddleware, [
     `, [status, status === 'countered' ? counter_price : null, counterBy, req.params.id]);
 
     if (status === 'accepted') {
-      await client.query("UPDATE listings SET status='reserved' WHERE id=$1", [offer.listing_id]);
+      await client.query(`
+        UPDATE listings
+        SET status='reserved',
+            reserved_at=NOW(),
+            reserved_until=NOW() + INTERVAL '7 days',
+            updated_at=NOW()
+        WHERE id=$1
+      `, [offer.listing_id]);
+      await client.query(`
+        UPDATE offers
+        SET status='rejected', updated_at=NOW()
+        WHERE listing_id=$1
+          AND id<>$2
+          AND status IN ('pending','countered')
+      `, [offer.listing_id, req.params.id]);
     }
 
     await client.query('COMMIT');
@@ -166,18 +199,32 @@ router.patch('/:id/buyer-respond', authMiddleware, [
     const { status, counter_price } = req.body;
 
     const { rows: offerRows } = await client.query(`
-      SELECT o.*, l.seller_id, l.crop_name, l.unit,
+      SELECT o.*, l.seller_id, l.crop_name, l.unit, l.status AS listing_status,
              buyer.name AS buyer_name, seller.name AS seller_name
       FROM offers o
       JOIN listings l ON l.id=o.listing_id
       JOIN users buyer ON buyer.id=o.buyer_id
       JOIN users seller ON seller.id=l.seller_id
       WHERE o.id=$1
+      FOR UPDATE OF o, l
     `, [req.params.id]);
-    if (!offerRows.length) return res.status(404).json({ error: 'Teklif bulunamadı.' });
+    if (!offerRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Teklif bulunamadı.' });
+    }
     const offer = offerRows[0];
-    if (offer.buyer_id !== req.user.id) return res.status(403).json({ error: 'Yetki yok.' });
-    if (offer.status !== 'countered') return res.status(400).json({ error: 'Sadece karşı teklife yanıt verebilirsiniz.' });
+    if (offer.buyer_id !== req.user.id) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Yetki yok.' });
+    }
+    if (offer.status !== 'countered') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Sadece karşı teklife yanıt verebilirsiniz.' });
+    }
+    if (status === 'accepted' && offer.listing_status !== 'active') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Bu ilan artık teklif kabul etmeye uygun değil.' });
+    }
 
     const counterBy = status === 'countered' ? 'buyer' : null;
     const { rows } = await client.query(`
@@ -186,7 +233,21 @@ router.patch('/:id/buyer-respond', authMiddleware, [
     `, [status, status === 'countered' ? counter_price : null, counterBy, req.params.id]);
 
     if (status === 'accepted') {
-      await client.query("UPDATE listings SET status='reserved' WHERE id=$1", [offer.listing_id]);
+      await client.query(`
+        UPDATE listings
+        SET status='reserved',
+            reserved_at=NOW(),
+            reserved_until=NOW() + INTERVAL '7 days',
+            updated_at=NOW()
+        WHERE id=$1
+      `, [offer.listing_id]);
+      await client.query(`
+        UPDATE offers
+        SET status='rejected', updated_at=NOW()
+        WHERE listing_id=$1
+          AND id<>$2
+          AND status IN ('pending','countered')
+      `, [offer.listing_id, req.params.id]);
     }
 
     await client.query('COMMIT');
@@ -236,13 +297,22 @@ router.patch('/:id/edit-counter', authMiddleware, [
       'SELECT o.*, l.seller_id FROM offers o JOIN listings l ON l.id=o.listing_id WHERE o.id=$1',
       [req.params.id]
     );
-    if (!offerRows.length) return res.status(404).json({ error: 'Teklif bulunamadı.' });
-    if (offerRows[0].status !== 'countered') return res.status(400).json({ error: 'Sadece bekleyen karşı teklifi düzenleyebilirsiniz.' });
+    if (!offerRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Teklif bulunamadı.' });
+    }
+    if (offerRows[0].status !== 'countered') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Sadece bekleyen karşı teklifi düzenleyebilirsiniz.' });
+    }
     const isSeller = offerRows[0].seller_id === req.user.id;
     const isBuyer  = offerRows[0].buyer_id  === req.user.id;
     const madeByMe = (isSeller && offerRows[0].counter_by === 'seller') ||
                      (isBuyer  && offerRows[0].counter_by === 'buyer');
-    if (!madeByMe) return res.status(403).json({ error: 'Sadece kendi karşı teklifinizi düzenleyebilirsiniz.' });
+    if (!madeByMe) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Sadece kendi karşı teklifinizi düzenleyebilirsiniz.' });
+    }
     const { rows } = await client.query(
       'UPDATE offers SET counter_price=$1, updated_at=NOW() WHERE id=$2 RETURNING *',
       [counter_price, req.params.id]
@@ -265,15 +335,25 @@ router.patch('/:id/cancel-counter', authMiddleware, async (req, res, next) => {
       JOIN users buyer ON buyer.id=o.buyer_id
       JOIN users seller ON seller.id=l.seller_id
       WHERE o.id=$1
+      FOR UPDATE OF o, l
     `, [req.params.id]);
-    if (!offerRows.length) return res.status(404).json({ error: 'Teklif bulunamadı.' });
+    if (!offerRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Teklif bulunamadı.' });
+    }
     const offer = offerRows[0];
-    if (offer.status !== 'countered') return res.status(400).json({ error: 'İptal edilecek karşı teklif yok.' });
+    if (offer.status !== 'countered') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'İptal edilecek karşı teklif yok.' });
+    }
     const isSeller = offer.seller_id === req.user.id;
     const isBuyer  = offer.buyer_id  === req.user.id;
     const madeByMe = (isSeller && offer.counter_by === 'seller') ||
                      (isBuyer  && offer.counter_by === 'buyer');
-    if (!madeByMe) return res.status(403).json({ error: 'Sadece kendi karşı teklifinizi iptal edebilirsiniz.' });
+    if (!madeByMe) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Sadece kendi karşı teklifinizi iptal edebilirsiniz.' });
+    }
 
     const { rows } = await client.query(
       "UPDATE offers SET status='pending', counter_price=NULL, counter_by=NULL, updated_at=NOW() WHERE id=$1 RETURNING *",

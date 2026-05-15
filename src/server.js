@@ -9,6 +9,7 @@ const listingRoutes  = require('./routes/listings');
 const offerRoutes    = require('./routes/offers');
 const { pricesRouter, usersRouter } = require('./routes/other');
 const errorHandler   = require('./middleware/errorHandler');
+const { scheduleReservedListingCleanup } = require('./jobs/cleanupReservedListings');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -60,5 +61,7 @@ app.listen(PORT, () => {
   console.log(`\n🌾  Tarım Pazar API running on http://localhost:${PORT}`);
   console.log(`   ENV: ${process.env.NODE_ENV || 'development'}\n`);
 });
+
+scheduleReservedListingCleanup();
 
 module.exports = app;

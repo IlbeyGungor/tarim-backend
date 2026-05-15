@@ -24,7 +24,16 @@ router.get('/', async (req, res, next) => {
     const { search, category, city, status, page = 1, limit = 20 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const params = [];
-    const conditions = ["l.status != 'sold'"];
+    const conditions = ["l.status = 'active'"];
+
+    if (status && status !== 'active') {
+      return res.json({
+        listings: [],
+        total: 0,
+        page: parseInt(page),
+        totalPages: 0,
+      });
+    }
 
     if (search) {
       params.push(`%${search}%`);
@@ -32,7 +41,6 @@ router.get('/', async (req, res, next) => {
     }
     if (category) { params.push(category); conditions.push(`l.category = $${params.length}`); }
     if (city)     { params.push(city);     conditions.push(`l.city = $${params.length}`); }
-    if (status)   { params.push(status);   conditions.push(`l.status = $${params.length}`); }
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     params.push(parseInt(limit), offset);
@@ -59,13 +67,34 @@ router.get('/', async (req, res, next) => {
 });
 
 // GET /api/listings/:id  (public)
-router.get('/:id', async (req, res, next) => {
+router.get('/:id', authMiddleware.optional, async (req, res, next) => {
   try {
     const { rows } = await query(`${LISTING_SELECT} WHERE l.id=$1`, [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'İlan bulunamadı.' });
+
+    const listing = rows[0];
+    if (listing.status === 'reserved') {
+      if (!req.user) return res.status(404).json({ error: 'İlan bulunamadı.' });
+
+      const { rows: accessRows } = await query(
+        `SELECT 1 FROM offers
+         WHERE listing_id=$1 AND buyer_id=$2 AND status='accepted'
+         LIMIT 1`,
+        [req.params.id, req.user.id]
+      );
+      const canAccessReserved =
+        listing.seller_id === req.user.id || accessRows.length > 0;
+      if (!canAccessReserved) {
+        return res.status(404).json({ error: 'İlan bulunamadı.' });
+      }
+    } else if (listing.status !== 'active') {
+      const isOwner = req.user && listing.seller_id === req.user.id;
+      if (!isOwner) return res.status(404).json({ error: 'İlan bulunamadı.' });
+    }
+
     // Increment view count
     await query('UPDATE listings SET view_count = view_count + 1 WHERE id=$1', [req.params.id]);
-    res.json(rows[0]);
+    res.json(listing);
   } catch (err) { next(err); }
 });
 

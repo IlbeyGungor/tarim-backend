@@ -60,6 +60,8 @@ console.log('DB INFO:', dbInfo.rows[0]);
         harvest_date    DATE,
         view_count      INTEGER DEFAULT 0,
         offer_count     INTEGER DEFAULT 0,
+        reserved_at     TIMESTAMPTZ,
+        reserved_until  TIMESTAMPTZ,
         created_at      TIMESTAMPTZ DEFAULT NOW(),
         updated_at      TIMESTAMPTZ DEFAULT NOW()
       )
@@ -82,6 +84,17 @@ console.log('DB INFO:', dbInfo.rows[0]);
         created_at      TIMESTAMPTZ DEFAULT NOW(),
         updated_at      TIMESTAMPTZ DEFAULT NOW()
       )
+    `);
+
+    // Existing DBs may already have listings without reservation timestamps.
+    await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS reserved_at TIMESTAMPTZ`);
+    await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS reserved_until TIMESTAMPTZ`);
+    await client.query(`
+      UPDATE listings
+      SET reserved_at = COALESCE(reserved_at, updated_at, NOW()),
+          reserved_until = COALESCE(reserved_until, COALESCE(reserved_at, updated_at, NOW()) + INTERVAL '7 days')
+      WHERE status = 'reserved'
+        AND reserved_until IS NULL
     `);
 
     // ── messages ───────────────────────────────────────────────
@@ -160,6 +173,11 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_city       ON listings(city)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_category   ON listings(category)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_status     ON listings(status)`);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_listings_reserved_until
+      ON listings(reserved_until)
+      WHERE status = 'reserved'
+    `);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_offers_listing      ON offers(listing_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_offers_buyer        ON offers(buyer_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_offer      ON messages(offer_id)`);
