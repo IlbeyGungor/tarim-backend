@@ -18,7 +18,7 @@ router.get('/my', authMiddleware, async (req, res, next) => {
       JOIN users u ON u.id = l.seller_id
       WHERE o.buyer_id = $1
         AND o.buyer_deleted_at IS NULL
-        AND (l.status <> 'reserved' OR o.status = 'accepted')
+        AND (l.status <> 'reserved' OR o.status IN ('accepted','rejected'))
       ORDER BY o.created_at DESC
     `, [req.user.id]);
     res.json(rows);
