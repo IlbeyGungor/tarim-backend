@@ -215,6 +215,22 @@ usersRouter.get('/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/users/:id/reviews
+usersRouter.get('/:id/reviews', async (req, res, next) => {
+  try {
+    const { rows } = await query(`
+      SELECT r.*,
+        json_build_object('id', reviewer.id, 'name', reviewer.name, 'role', reviewer.role) AS reviewer,
+        json_build_object('id', reviewee.id, 'name', reviewee.name, 'role', reviewee.role) AS reviewee
+      FROM reviews r
+      JOIN users reviewer ON reviewer.id = r.reviewer_id
+      JOIN users reviewee ON reviewee.id = r.reviewee_id
+      WHERE r.reviewee_id=$1
+      ORDER BY r.created_at DESC
+    `, [req.params.id]);
+    res.json(rows);
+  } catch (err) { next(err); }
+});
 // PATCH /api/users/me  (update own profile)
 usersRouter.patch('/me', authMiddleware, async (req, res, next) => {
   try {

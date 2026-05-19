@@ -81,6 +81,8 @@ console.log('DB INFO:', dbInfo.rows[0]);
         counter_by      VARCHAR(20) CHECK (counter_by IN ('seller','buyer')),
         buyer_deleted_at TIMESTAMPTZ,
         seller_deleted_at TIMESTAMPTZ,
+        buyer_chat_deleted_at TIMESTAMPTZ,
+        seller_chat_deleted_at TIMESTAMPTZ,
         created_at      TIMESTAMPTZ DEFAULT NOW(),
         updated_at      TIMESTAMPTZ DEFAULT NOW()
       )
@@ -97,6 +99,9 @@ console.log('DB INFO:', dbInfo.rows[0]);
         AND reserved_until IS NULL
     `);
 
+    await client.query(`ALTER TABLE offers ADD COLUMN IF NOT EXISTS buyer_chat_deleted_at TIMESTAMPTZ`);
+    await client.query(`ALTER TABLE offers ADD COLUMN IF NOT EXISTS seller_chat_deleted_at TIMESTAMPTZ`);
+
     // ── messages ───────────────────────────────────────────────
     await client.query(`
       CREATE TABLE IF NOT EXISTS messages (
@@ -106,6 +111,20 @@ console.log('DB INFO:', dbInfo.rows[0]);
         text        TEXT NOT NULL,
         is_read     BOOLEAN DEFAULT FALSE,
         created_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    // ── reviews ────────────────────────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS reviews (
+        id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        offer_id     UUID NOT NULL,
+        reviewer_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        reviewee_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        rating       INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+        message      TEXT NOT NULL,
+        created_at   TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (reviewer_id, reviewee_id)
       )
     `);
 
@@ -181,6 +200,9 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_offers_listing      ON offers(listing_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_offers_buyer        ON offers(buyer_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_offer      ON messages(offer_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_reviews_reviewee    ON reviews(reviewee_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_reviews_offer       ON reviews(offer_id)`);
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_unique_pair ON reviews(reviewer_id, reviewee_id)`);
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_market_price_history_lookup
       ON market_price_history(product, market, city, price_date DESC)

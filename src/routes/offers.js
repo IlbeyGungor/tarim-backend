@@ -5,6 +5,143 @@ const { query, getClient } = require('../db');
 const authMiddleware = require('../middleware/auth');
 const notify = require('../utils/notify');
 
+function chatAccessWhere(alias = 'o') {
+  return `(
+    (${alias}.buyer_id = $1 AND ${alias}.buyer_chat_deleted_at IS NULL)
+    OR (l.seller_id = $1 AND ${alias}.seller_chat_deleted_at IS NULL)
+  )`;
+}
+
+// GET /api/offers/chats — accepted offer chats for current user
+router.get('/chats', authMiddleware, async (req, res, next) => {
+  try {
+    const { rows } = await query(`
+      SELECT
+        o.id AS offer_id,
+        o.listing_id,
+        o.buyer_id,
+        l.seller_id,
+        o.updated_at,
+        json_build_object(
+          'id', l.id,
+          'crop_name', l.crop_name,
+          'city', l.city,
+          'district', l.district,
+          'unit', l.unit,
+          'price_per_unit', l.price_per_unit,
+          'status', l.status
+        ) AS listing,
+        CASE
+          WHEN o.buyer_id = $1 THEN json_build_object('id', seller.id, 'name', seller.name, 'phone', seller.phone, 'role', seller.role, 'rating', seller.rating, 'is_verified', seller.is_verified)
+          ELSE json_build_object('id', buyer.id, 'name', buyer.name, 'phone', buyer.phone, 'role', buyer.role, 'rating', buyer.rating, 'is_verified', buyer.is_verified)
+        END AS other_user,
+        last_message.text AS last_message,
+        last_message.created_at AS last_message_at
+      FROM offers o
+      JOIN listings l ON l.id = o.listing_id
+      JOIN users buyer ON buyer.id = o.buyer_id
+      JOIN users seller ON seller.id = l.seller_id
+      LEFT JOIN LATERAL (
+        SELECT text, created_at
+        FROM messages
+        WHERE offer_id = o.id
+        ORDER BY created_at DESC
+        LIMIT 1
+      ) last_message ON true
+      WHERE o.status = 'accepted'
+        AND ${chatAccessWhere('o')}
+      ORDER BY COALESCE(last_message.created_at, o.updated_at, o.created_at) DESC
+    `, [req.user.id]);
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/offers/:id/chat — hide chat for current user
+router.delete('/:id/chat', authMiddleware, async (req, res, next) => {
+  try {
+    const { rows } = await query(`
+      SELECT o.id, o.buyer_id, l.seller_id
+      FROM offers o
+      JOIN listings l ON l.id = o.listing_id
+      WHERE o.id=$1 AND o.status='accepted'
+    `, [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: 'Sohbet bulunamadı.' });
+
+    const chat = rows[0];
+    if (chat.buyer_id !== req.user.id && chat.seller_id !== req.user.id) {
+      return res.status(403).json({ error: 'Yetki yok.' });
+    }
+
+    if (chat.buyer_id === req.user.id) {
+      await query('UPDATE offers SET buyer_chat_deleted_at=NOW(), updated_at=NOW() WHERE id=$1', [req.params.id]);
+    } else {
+      await query('UPDATE offers SET seller_chat_deleted_at=NOW(), updated_at=NOW() WHERE id=$1', [req.params.id]);
+    }
+
+    res.json({ message: 'Sohbet listenizden kaldırıldı.' });
+  } catch (err) { next(err); }
+});
+
+// POST /api/offers/:id/reviews — one review per accepted offer per user
+router.post('/:id/reviews', authMiddleware, [
+  body('reviewee_id').notEmpty(),
+  body('rating').isInt({ min: 1, max: 5 }),
+  body('message').trim().notEmpty(),
+], async (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    const { reviewee_id, rating, message } = req.body;
+    const { rows: offerRows } = await client.query(`
+      SELECT o.id, o.buyer_id, l.seller_id
+      FROM offers o
+      JOIN listings l ON l.id = o.listing_id
+      WHERE o.id=$1 AND o.status='accepted'
+    `, [req.params.id]);
+    if (!offerRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Kabul edilmiş teklif bulunamadı.' });
+    }
+
+    const offer = offerRows[0];
+    const isBuyer = offer.buyer_id === req.user.id;
+    const isSeller = offer.seller_id === req.user.id;
+    if (!isBuyer && !isSeller) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Yetki yok.' });
+    }
+
+    const expectedReviewee = isBuyer ? offer.seller_id : offer.buyer_id;
+    if (reviewee_id !== expectedReviewee) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Sadece bu sohbetteki karşı tarafı değerlendirebilirsiniz.' });
+    }
+
+    const { rows } = await client.query(`
+      INSERT INTO reviews (offer_id, reviewer_id, reviewee_id, rating, message)
+      VALUES ($1,$2,$3,$4,$5)
+      RETURNING *
+    `, [req.params.id, req.user.id, reviewee_id, rating, message.trim()]);
+
+    await client.query(`
+      UPDATE users
+      SET rating = COALESCE((SELECT AVG(rating)::numeric(3,2) FROM reviews WHERE reviewee_id=$1), 0),
+          total_trades = (SELECT COUNT(*) FROM reviews WHERE reviewee_id=$1),
+          updated_at = NOW()
+      WHERE id=$1
+    `, [reviewee_id]);
+
+    await client.query('COMMIT');
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    if (err.code === '23505') return res.status(409).json({ error: 'Bu teklif için zaten değerlendirme yaptınız.' });
+    next(err);
+  } finally { client.release(); }
+});
+
 // GET /api/offers/my
 router.get('/my', authMiddleware, async (req, res, next) => {
   try {
@@ -479,9 +616,25 @@ router.delete('/:id', authMiddleware, async (req, res, next) => {
   }
 });
 
+async function requireAcceptedChatParticipant(offerId, userId) {
+  const { rows } = await query(`
+    SELECT o.id, o.buyer_id, l.seller_id
+    FROM offers o
+    JOIN listings l ON l.id = o.listing_id
+    WHERE o.id=$1 AND o.status='accepted'
+  `, [offerId]);
+  if (!rows.length) return null;
+  const offer = rows[0];
+  if (offer.buyer_id !== userId && offer.seller_id !== userId) return null;
+  return offer;
+}
+
 // GET /api/offers/:id/messages
 router.get('/:id/messages', authMiddleware, async (req, res, next) => {
   try {
+    const offer = await requireAcceptedChatParticipant(req.params.id, req.user.id);
+    if (!offer) return res.status(404).json({ error: 'Sohbet bulunamadı.' });
+
     const { rows } = await query(`
       SELECT m.*, json_build_object('id',u.id,'name',u.name) AS sender
       FROM messages m JOIN users u ON u.id = m.sender_id
@@ -498,10 +651,15 @@ router.post('/:id/messages', authMiddleware, [
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
   try {
+    const offer = await requireAcceptedChatParticipant(req.params.id, req.user.id);
+    if (!offer) return res.status(404).json({ error: 'Sohbet bulunamadı.' });
+
     const { rows } = await query(
       'INSERT INTO messages (offer_id,sender_id,text) VALUES ($1,$2,$3) RETURNING *',
       [req.params.id, req.user.id, req.body.text]
     );
+    const clearColumn = offer.buyer_id === req.user.id ? 'seller_chat_deleted_at' : 'buyer_chat_deleted_at';
+    await query(`UPDATE offers SET ${clearColumn}=NULL, updated_at=NOW() WHERE id=$1`, [req.params.id]);
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
 });
