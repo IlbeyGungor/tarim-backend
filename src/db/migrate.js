@@ -63,7 +63,8 @@ console.log('DB INFO:', dbInfo.rows[0]);
         reserved_at     TIMESTAMPTZ,
         reserved_until  TIMESTAMPTZ,
         created_at      TIMESTAMPTZ DEFAULT NOW(),
-        updated_at      TIMESTAMPTZ DEFAULT NOW()
+        updated_at      TIMESTAMPTZ DEFAULT NOW(),
+        image_urls      JSONB NOT NULL DEFAULT '[]'::jsonb
       )
     `);
 
