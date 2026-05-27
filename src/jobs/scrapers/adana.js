@@ -102,11 +102,11 @@ async function fetchAdanaRows() {
     const rawMinPrice = $(cells[2]).text().trim();
     const rawMaxPrice = $(cells[3]).text().trim();
 
-    const productName = normalizeProduct(rawProduct);
+    const productName = rawProduct;
     const unit = normalizeUnit(rawUnit);
     const minPrice = parsePrice(rawMinPrice);
     const maxPrice = parsePrice(rawMaxPrice);
-
+ß
     if (!productName || !unit) return;
     if (minPrice === null || maxPrice === null) return;
 

@@ -11,9 +11,16 @@ function parsePrice(value) {
     .replace("TL", "")
     .replace(/\s+/g, "");
 
-  // TR format: 1.250,50
+  // Sadece sayı, nokta ve virgül kalsın
+  cleaned = cleaned.replace(/[^\d.,-]/g, "");
+
+  // TR format: 1.250,50 -> 1250.50
   if (cleaned.includes(",")) {
     cleaned = cleaned.replace(/\./g, "").replace(",", ".");
+  }
+  // Virgül yoksa ama 1.250 / 12.500 gibi binlik nokta varsa
+  else if (/^\d{1,3}(\.\d{3})+$/.test(cleaned)) {
+    cleaned = cleaned.replace(/\./g, "");
   }
 
   const num = Number(cleaned);

@@ -158,13 +158,13 @@ function parseRowsFromPage($, url) {
     // 4: max fiyat
     // 5: ortalama fiyat
     if (cells.length >= 6) {
-      productName = normalizeProduct($(cells[1]).text());
+      productName = $(cells[1]).text();
       unit = normalizeUnit($(cells[2]).text());
       minPrice = parsePrice($(cells[3]).text());
       maxPrice = parsePrice($(cells[4]).text());
     } else {
       // Yedek yapı
-      productName = normalizeProduct($(cells[0]).text());
+      productName = $(cells[0]).text();
       unit = normalizeUnit($(cells[1]).text());
       minPrice = parsePrice($(cells[2]).text());
       maxPrice = parsePrice($(cells[3]).text());

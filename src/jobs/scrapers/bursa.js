@@ -129,7 +129,7 @@ async function fetchBursaRows() {
     const rawUnit = $(cells[1]).text().trim();
     const rawPriceText = $(cells[2]).text().trim();
 
-    const productName = normalizeProduct(rawProduct);
+    const productName = rawProduct;
     const unit = normalizeUnit(rawUnit);
 
     const { minPrice, maxPrice } = parsePriceRange(rawPriceText);
