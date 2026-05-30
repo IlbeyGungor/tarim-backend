@@ -4,6 +4,7 @@ const helmet  = require('helmet');
 const cors    = require('cors');
 const path    = require('path');
 
+const { scheduleMarketPriceUpdate } = require('./jobs/scheduleMarketPriceUpdate');
 const authRoutes     = require('./routes/auth');
 const listingRoutes  = require('./routes/listings');
 const offerRoutes    = require('./routes/offers');
@@ -63,5 +64,6 @@ app.listen(PORT, () => {
 });
 
 scheduleReservedListingCleanup();
+scheduleMarketPriceUpdate();
 
 module.exports = app;
