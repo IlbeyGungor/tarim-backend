@@ -1,17 +1,66 @@
-const axios = require("axios");
 const cheerio = require("cheerio");
+const { execFile } = require("node:child_process");
+const { promisify } = require("node:util");
+
+const execFileAsync = promisify(execFile);
 
 const URL = "https://www.adana.bel.tr/tr/hal-detay/2576";
+
+async function fetchHtmlWithCurl(url) {
+  try {
+    const { stdout } = await execFileAsync(
+      "curl",
+      [
+        "-4",
+        "-L",
+        "-sS",
+        "--compressed",
+        "--connect-timeout",
+        "20",
+        "--max-time",
+        "60",
+        "--retry",
+        "3",
+        "--retry-delay",
+        "3",
+        "-A",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+        "-H",
+        "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "-H",
+        "Accept-Language: tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+        url,
+      ],
+      {
+        maxBuffer: 20 * 1024 * 1024,
+      }
+    );
+
+    return stdout;
+  } catch (err) {
+    const stderr = err.stderr ? String(err.stderr) : "";
+    throw new Error(
+      `Adana curl request failed: ${err.message}${stderr ? ` | ${stderr}` : ""}`
+    );
+  }
+}
 
 function parsePrice(value) {
   if (!value) return null;
 
-  const cleaned = value
+  let cleaned = value
     .trim()
     .replace("₺", "")
     .replace("TL", "")
-    .replace(",", ".")
     .replace(/\s+/g, "");
+
+  // Türkçe sayı formatı desteği:
+  // 42,5      -> 42.5
+  // 1.250,5   -> 1250.5
+  // 1250      -> 1250
+  if (cleaned.includes(",")) {
+    cleaned = cleaned.replace(/\./g, "").replace(",", ".");
+  }
 
   const num = Number(cleaned);
 
@@ -25,35 +74,6 @@ function normalizeUnit(unit) {
     .trim()
     .toLocaleLowerCase("tr-TR")
     .replace(".", "");
-}
-
-function normalizeProduct(product) {
-  if (!product) return "";
-
-  let cleaned = product.trim().replace(/\s+/g, " ");
-
-  // Örn: LİMON(MAYER) -> Mayer Limon
-  const match = cleaned.match(/^(.+?)\((.+?)\)$/);
-
-  if (match) {
-    const mainProduct = match[1].trim();
-    const variety = match[2].trim();
-
-    return toTitleCase(`${variety} ${mainProduct}`);
-  }
-
-  return toTitleCase(cleaned);
-}
-
-function toTitleCase(text) {
-  return text
-    .toLocaleLowerCase("tr-TR")
-    .split(" ")
-    .map((word) => {
-      if (!word) return word;
-      return word.charAt(0).toLocaleUpperCase("tr-TR") + word.slice(1);
-    })
-    .join(" ");
 }
 
 function getIcon(productName) {
@@ -75,15 +95,8 @@ function getIcon(productName) {
 }
 
 async function fetchAdanaRows() {
-  const response = await axios.get(URL, {
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-      "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-    },
-    timeout: 20000,
-  });
-
-  const $ = cheerio.load(response.data);
+  const html = await fetchHtmlWithCurl(URL);
+  const $ = cheerio.load(html);
 
   const rows = [];
 
@@ -102,11 +115,13 @@ async function fetchAdanaRows() {
     const rawMinPrice = $(cells[2]).text().trim();
     const rawMaxPrice = $(cells[3]).text().trim();
 
+    // Ürün ismine dokunmuyoruz. Sitede ne yazıyorsa o.
     const productName = rawProduct;
+
     const unit = normalizeUnit(rawUnit);
     const minPrice = parsePrice(rawMinPrice);
     const maxPrice = parsePrice(rawMaxPrice);
-ß
+
     if (!productName || !unit) return;
     if (minPrice === null || maxPrice === null) return;
 
@@ -124,10 +139,11 @@ async function fetchAdanaRows() {
     });
   });
 
+  console.log(`✅ Adana rows fetched: ${rows.length}`);
+
   return rows;
 }
 
-
 module.exports = {
-  fetchAdanaRows
+  fetchAdanaRows,
 };

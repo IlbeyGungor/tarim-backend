@@ -7,6 +7,7 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
+    curl \
     ca-certificates \
     fonts-liberation \
     libasound2 \
