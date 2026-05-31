@@ -20,7 +20,6 @@ async function updateLatestHistoryCache() {
         FROM market_price_history h
         WHERE h.product = l.product
           AND h.scope = l.scope
-          AND h.market = l.market
           AND h.city = l.city
           AND h.production_type = l.production_type
           AND h.price_date >= CURRENT_DATE - INTERVAL '1 year'
