@@ -110,6 +110,9 @@ router.post('/firebase', [
     ensureFirebaseAdmin();
 
     const decoded = await admin.auth().verifyIdToken(req.body.idToken);
+    if (!decoded.email_verified) {
+      return res.status(403).json({ error: 'E-posta adresi doğrulanmamış.' });
+    }
     const phone = firebasePhoneKey(decoded.uid);
     const role = allowedRoles.includes(req.body.role) ? req.body.role : 'farmer';
     const name = firebaseDisplayName(decoded, req.body.name);
