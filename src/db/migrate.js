@@ -183,9 +183,14 @@ console.log('DB INFO:', dbInfo.rows[0]);
         latest_price_date DATE NOT NULL,
         prev_price_date   DATE,
         trend             NUMERIC(10,4) DEFAULT 0,
+        history_1y         JSONB NOT NULL DEFAULT '[]'::jsonb,
         updated_at        TIMESTAMPTZ DEFAULT NOW(),
         UNIQUE (product, market, city, production_type)
       )
+    `);
+    await client.query(`
+      ALTER TABLE market_price_latest
+      ADD COLUMN IF NOT EXISTS history_1y JSONB NOT NULL DEFAULT '[]'::jsonb
     `);
 
     // ── Indexes ────────────────────────────────────────────────

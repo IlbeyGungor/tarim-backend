@@ -199,6 +199,27 @@ pricesRouter.get('/history', async (req, res, next) => {
   }
 });
 
+// GET /api/prices/:id/history-1y
+// Detay ekranı için sadece açılan ürünün 1 yıllık özet geçmişini döndürür.
+pricesRouter.get('/:id/history-1y', async (req, res, next) => {
+  try {
+    const { rows } = await query(`
+      SELECT COALESCE(history_1y, '[]'::jsonb) AS history_1y
+      FROM market_price_latest
+      WHERE id = $1
+      LIMIT 1
+    `, [req.params.id]);
+
+    if (!rows.length) {
+      return res.status(404).json({ error: 'Hal fiyatı bulunamadı.' });
+    }
+
+    res.json(rows[0].history_1y || []);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ── Users ──────────────────────────────────────────────────────────────────
 const usersRouter = require('express').Router();
 
