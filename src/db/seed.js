@@ -15,11 +15,11 @@ const seed = async () => {
     const u1 = uuidv4(), u2 = uuidv4(), u3 = uuidv4();
 
     await client.query(`
-      INSERT INTO users (id,name,phone,password_hash,role,city,district,bio,tc_verified,cks_verified,is_verified,rating,total_trades)
+      INSERT INTO users (id,name,phone,phone_verified,password_hash,city,district,bio,tc_verified,cks_verified,is_verified,rating,total_trades)
       VALUES
-        ($1,'Ahmet Yılmaz','+905321234567',$4,'farmer','İzmir','Ödemiş','Ege bölgesinde zeytin ve incir üreticisiyim.',true,true,true,4.8,34),
-        ($2,'Fatma Kaya','+905422223344',$4,'farmer','Konya','Çumra','Buğday ve arpa üreticisi.',true,false,true,4.5,18),
-        ($3,'Ali Komisyon','+905334445566',$4,'middleman','İstanbul','Bağcılar','10 yıldır komisyonculuk yapıyorum.',true,false,true,4.7,120)
+        ($1,'Ahmet Yılmaz','+905321234567',true,$4,'İzmir','Ödemiş','Ege bölgesinde zeytin ve incir üreticisiyim.',true,true,true,4.8,34),
+        ($2,'Fatma Kaya','+905422223344',true,$4,'Konya','Çumra','Buğday ve arpa üreticisi.',true,false,true,4.5,18),
+        ($3,'Ali Komisyon','+905334445566',true,$4,'İstanbul','Bağcılar','10 yıldır komisyonculuk yapıyorum.',true,false,true,4.7,120)
     `, [u1, u2, u3, hash]);
 
     // ── Listings ───────────────────────────────────────────────

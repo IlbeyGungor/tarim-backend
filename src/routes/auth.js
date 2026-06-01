@@ -7,8 +7,6 @@ const { body, validationResult } = require('express-validator');
 const { query } = require('../db');
 const authMiddleware = require('../middleware/auth');
 
-const allowedRoles = ['farmer', 'middleman', 'trader'];
-
 function ensureFirebaseAdmin() {
   if (admin.apps.length) return;
   if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
@@ -22,7 +20,7 @@ function ensureFirebaseAdmin() {
 
 function signUserToken(user) {
   return jwt.sign(
-    { id: user.id, phone: user.phone, role: user.role },
+    { id: user.id, phone: user.phone },
     process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRES_IN || '30d' }
   );
@@ -46,13 +44,12 @@ router.post('/register', [
   body('name').trim().notEmpty().withMessage('İsim zorunludur.'),
   body('phone').trim().notEmpty().withMessage('Telefon zorunludur.'),
   body('password').isLength({ min: 6 }).withMessage('Şifre en az 6 karakter.'),
-  body('role').isIn(['farmer','middleman','trader']).withMessage('Geçersiz rol.'),
 ], async (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
   try {
-    const { name, phone, password, role, city, district, bio } = req.body;
+    const { name, phone, password, city, district, bio } = req.body;
 
     const existing = await query('SELECT id FROM users WHERE phone=$1', [phone]);
     if (existing.rows.length > 0) {
@@ -61,10 +58,10 @@ router.post('/register', [
 
     const hash = await bcrypt.hash(password, 10);
     const result = await query(`
-      INSERT INTO users (name,phone,password_hash,role,city,district,bio)
-      VALUES ($1,$2,$3,$4,$5,$6,$7)
-      RETURNING id,name,phone,role,city,district,tc_verified,cks_verified,is_verified,rating,total_trades,created_at
-    `, [name, phone, hash, role, city||null, district||null, bio||null]);
+      INSERT INTO users (name,phone,password_hash,city,district,bio,phone_verified)
+      VALUES ($1,$2,$3,$4,$5,$6,false)
+      RETURNING id,name,phone,phone_verified,city,district,tc_verified,cks_verified,is_verified,rating,total_trades,created_at
+    `, [name, phone, hash, city||null, district||null, bio||null]);
 
     const user = result.rows[0];
     const token = signUserToken(user);
@@ -83,7 +80,11 @@ router.post('/login', [
 
   try {
     const { phone, password } = req.body;
-    const result = await query('SELECT * FROM users WHERE phone=$1', [phone]);
+    const result = await query(`
+      SELECT id,name,phone,phone_verified,password_hash,city,district,bio,tc_verified,cks_verified,
+             is_verified,rating,total_trades,profile_image,created_at
+      FROM users WHERE phone=$1
+    `, [phone]);
     if (result.rows.length === 0) {
       return res.status(401).json({ error: 'Telefon veya şifre hatalı.' });
     }
@@ -113,26 +114,38 @@ router.post('/firebase', [
     if (!decoded.email_verified) {
       return res.status(403).json({ error: 'E-posta adresi doğrulanmamış.' });
     }
-    const phone = firebasePhoneKey(decoded.uid);
-    const role = allowedRoles.includes(req.body.role) ? req.body.role : 'farmer';
+    const legacyPhone = firebasePhoneKey(decoded.uid);
     const name = firebaseDisplayName(decoded, req.body.name);
-    const city = String(req.body.city || '').trim() || null;
 
     const existing = await query(`
-      SELECT id,name,phone,role,city,district,bio,tc_verified,cks_verified,
+      SELECT id,name,phone,phone_verified,city,district,bio,tc_verified,cks_verified,
              is_verified,rating,total_trades,profile_image,created_at
       FROM users
-      WHERE phone=$1
-    `, [phone]);
+      WHERE firebase_uid=$1 OR phone=$2
+      LIMIT 1
+    `, [decoded.uid, legacyPhone]);
 
     let user = existing.rows[0];
-    if (!user) {
+    if (user) {
+      const shouldClearLegacyPhone = user.phone === legacyPhone;
       const result = await query(`
-        INSERT INTO users (name,phone,password_hash,role,city)
-        VALUES ($1,$2,$3,$4,$5)
-        RETURNING id,name,phone,role,city,district,bio,tc_verified,cks_verified,
+        UPDATE users
+        SET firebase_uid=$1,
+            phone=CASE WHEN $2 THEN NULL ELSE phone END,
+            phone_verified=CASE WHEN $2 THEN false ELSE phone_verified END,
+            updated_at=NOW()
+        WHERE id=$3
+        RETURNING id,name,phone,phone_verified,city,district,bio,tc_verified,cks_verified,
                   is_verified,rating,total_trades,profile_image,created_at
-      `, [name, phone, `firebase:${decoded.uid}`, role, city]);
+      `, [decoded.uid, shouldClearLegacyPhone, user.id]);
+      user = result.rows[0];
+    } else {
+      const result = await query(`
+        INSERT INTO users (name,password_hash,firebase_uid)
+        VALUES ($1,$2,$3)
+        RETURNING id,name,phone,phone_verified,city,district,bio,tc_verified,cks_verified,
+                  is_verified,rating,total_trades,profile_image,created_at
+      `, [name, `firebase:${decoded.uid}`, decoded.uid]);
       user = result.rows[0];
     }
 
@@ -147,7 +160,7 @@ router.post('/firebase', [
 router.get('/me', authMiddleware, async (req, res, next) => {
   try {
     const result = await query(`
-      SELECT id,name,phone,role,city,district,bio,tc_verified,cks_verified,
+      SELECT id,name,phone,phone_verified,city,district,bio,tc_verified,cks_verified,
              is_verified,rating,total_trades,profile_image,created_at
       FROM users WHERE id=$1
     `, [req.user.id]);

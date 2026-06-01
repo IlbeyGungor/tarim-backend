@@ -9,7 +9,7 @@ const LISTING_SELECT = `
     l.*,
     json_build_object(
       'id', u.id, 'name', u.name, 'phone', u.phone,
-      'role', u.role, 'city', u.city, 'district', u.district,
+      'phone_verified', u.phone_verified, 'city', u.city, 'district', u.district,
       'tc_verified', u.tc_verified, 'cks_verified', u.cks_verified,
       'is_verified', u.is_verified, 'rating', u.rating,
       'total_trades', u.total_trades, 'profile_image', u.profile_image

@@ -73,7 +73,7 @@ router.post('/:id/images', authMiddleware, upload.array('images', 5), async (req
       WHERE id=$2
       RETURNING *,
         (SELECT row_to_json(u) FROM (
-          SELECT id,name,phone,role,city,district,tc_verified,cks_verified,
+          SELECT id,name,phone,phone_verified,city,district,tc_verified,cks_verified,
                  is_verified,rating,total_trades FROM users WHERE id=listings.seller_id
         ) u) AS seller
     `, [JSON.stringify(merged), req.params.id]);

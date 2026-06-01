@@ -1,7 +1,19 @@
 // ── Market Prices ──────────────────────────────────────────────────────────
 const pricesRouter = require('express').Router();
+const admin = require('firebase-admin');
 const { query, getClient } = require('../db');
 const authMiddleware = require('../middleware/auth');
+
+function ensureFirebaseAdmin() {
+  if (admin.apps.length) return;
+  if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
+    throw new Error('FIREBASE_SERVICE_ACCOUNT tanımlı değil.');
+  }
+  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+  });
+}
 
 // GET /api/prices  (public)
 // Ana liste için: her ürün + hal kombinasyonunun son mümkün fiyatı
@@ -227,7 +239,7 @@ const usersRouter = require('express').Router();
 usersRouter.get('/:id', async (req, res, next) => {
   try {
     const { rows } = await query(`
-      SELECT id,name,role,city,district,bio,tc_verified,cks_verified,
+      SELECT id,name,phone_verified,city,district,bio,tc_verified,cks_verified,
              is_verified,rating,total_trades,profile_image,created_at
       FROM users WHERE id=$1
     `, [req.params.id]);
@@ -241,8 +253,8 @@ usersRouter.get('/:id/reviews', async (req, res, next) => {
   try {
     const { rows } = await query(`
       SELECT r.*,
-        json_build_object('id', reviewer.id, 'name', reviewer.name, 'role', reviewer.role) AS reviewer,
-        json_build_object('id', reviewee.id, 'name', reviewee.name, 'role', reviewee.role) AS reviewee
+        json_build_object('id', reviewer.id, 'name', reviewer.name) AS reviewer,
+        json_build_object('id', reviewee.id, 'name', reviewee.name) AS reviewee
       FROM reviews r
       JOIN users reviewer ON reviewer.id = r.reviewer_id
       JOIN users reviewee ON reviewee.id = r.reviewee_id
@@ -267,11 +279,45 @@ usersRouter.patch('/me', authMiddleware, async (req, res, next) => {
     params.push(req.user.id);
     const { rows } = await query(
       `UPDATE users SET ${sets.join(',')}, updated_at=NOW() WHERE id=$${params.length}
-       RETURNING id,name,phone,role,city,district,bio,tc_verified,cks_verified,is_verified,rating,total_trades`,
+       RETURNING id,name,phone,phone_verified,city,district,bio,tc_verified,cks_verified,is_verified,rating,total_trades,profile_image,created_at`,
       params
     );
     res.json(rows[0]);
   } catch (err) { next(err); }
+});
+
+// PATCH /api/users/me/phone — Firebase SMS ile doğrulanmış telefonu kaydet
+usersRouter.patch('/me/phone', authMiddleware, async (req, res, next) => {
+  try {
+    ensureFirebaseAdmin();
+    const idToken = String(req.body.idToken || '').trim();
+    if (!idToken) return res.status(400).json({ error: 'Firebase token zorunludur.' });
+
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    const phone = String(decoded.phone_number || '').trim();
+    if (!phone) return res.status(400).json({ error: 'Doğrulanmış telefon bulunamadı.' });
+
+    const current = await query('SELECT firebase_uid FROM users WHERE id=$1', [req.user.id]);
+    if (!current.rows.length) return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
+    const currentFirebaseUid = current.rows[0].firebase_uid;
+    if (currentFirebaseUid && currentFirebaseUid !== decoded.uid) {
+      return res.status(403).json({ error: 'Firebase oturumu bu hesapla eşleşmiyor.' });
+    }
+
+    const { rows } = await query(`
+      UPDATE users
+      SET phone=$1, phone_verified=true, firebase_uid=COALESCE(firebase_uid, $2), updated_at=NOW()
+      WHERE id=$3
+      RETURNING id,name,phone,phone_verified,city,district,bio,tc_verified,cks_verified,
+                is_verified,rating,total_trades,profile_image,created_at
+    `, [phone, decoded.uid, req.user.id]);
+    res.json(rows[0]);
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'Bu telefon numarası başka bir hesapta kayıtlı.' });
+    }
+    next(err);
+  }
 });
 
 // DELETE /api/users/me  — permanently delete account and all related data

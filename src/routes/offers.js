@@ -32,8 +32,8 @@ router.get('/chats', authMiddleware, async (req, res, next) => {
           'status', l.status
         ) AS listing,
         CASE
-          WHEN o.buyer_id = $1 THEN json_build_object('id', seller.id, 'name', seller.name, 'phone', seller.phone, 'role', seller.role, 'rating', seller.rating, 'is_verified', seller.is_verified)
-          ELSE json_build_object('id', buyer.id, 'name', buyer.name, 'phone', buyer.phone, 'role', buyer.role, 'rating', buyer.rating, 'is_verified', buyer.is_verified)
+          WHEN o.buyer_id = $1 THEN json_build_object('id', seller.id, 'name', seller.name, 'phone', seller.phone, 'phone_verified', seller.phone_verified, 'rating', seller.rating, 'is_verified', seller.is_verified)
+          ELSE json_build_object('id', buyer.id, 'name', buyer.name, 'phone', buyer.phone, 'phone_verified', buyer.phone_verified, 'rating', buyer.rating, 'is_verified', buyer.is_verified)
         END AS other_user,
         last_message.text AS last_message,
         last_message.created_at AS last_message_at
@@ -149,7 +149,7 @@ router.get('/my', authMiddleware, async (req, res, next) => {
       SELECT o.*,
         json_build_object('id',l.id,'crop_name',l.crop_name,'city',l.city,
           'district',l.district,'unit',l.unit,'price_per_unit',l.price_per_unit) AS listing,
-        json_build_object('id',u.id,'name',u.name,'phone',u.phone,'role',u.role) AS seller
+        json_build_object('id',u.id,'name',u.name,'phone',u.phone,'phone_verified',u.phone_verified) AS seller
       FROM offers o
       JOIN listings l ON l.id = o.listing_id
       JOIN users u ON u.id = l.seller_id
@@ -168,7 +168,7 @@ router.get('/received', authMiddleware, async (req, res, next) => {
     const { rows } = await query(`
       SELECT o.*,
         json_build_object('id',l.id,'crop_name',l.crop_name,'city',l.city,'district',l.district,'unit',l.unit,'price_per_unit',l.price_per_unit) AS listing,
-        json_build_object('id',u.id,'name',u.name,'phone',u.phone,'rating',u.rating,'is_verified',u.is_verified) AS buyer
+        json_build_object('id',u.id,'name',u.name,'phone',u.phone,'phone_verified',u.phone_verified,'rating',u.rating,'is_verified',u.is_verified) AS buyer
       FROM offers o
       JOIN listings l ON l.id = o.listing_id
       JOIN users u ON u.id = o.buyer_id

@@ -23,9 +23,10 @@ console.log('DB INFO:', dbInfo.rows[0]);
       CREATE TABLE IF NOT EXISTS users (
         id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
         name            VARCHAR(120) NOT NULL,
-        phone           VARCHAR(20)  NOT NULL UNIQUE,
+        phone           VARCHAR(20) UNIQUE,
+        phone_verified  BOOLEAN DEFAULT FALSE,
+        firebase_uid    VARCHAR(128) UNIQUE,
         password_hash   VARCHAR(255) NOT NULL,
-        role            VARCHAR(30)  NOT NULL CHECK (role IN ('farmer','middleman','trader')),
         city            VARCHAR(80),
         district        VARCHAR(80),
         address         VARCHAR(255),
@@ -39,6 +40,21 @@ console.log('DB INFO:', dbInfo.rows[0]);
         created_at      TIMESTAMPTZ DEFAULT NOW(),
         updated_at      TIMESTAMPTZ DEFAULT NOW()
       )
+    `);
+
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_verified BOOLEAN DEFAULT FALSE`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS firebase_uid VARCHAR(128) UNIQUE`);
+    await client.query(`ALTER TABLE users ALTER COLUMN phone DROP NOT NULL`);
+    await client.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='users' AND column_name='role'
+        ) THEN
+          ALTER TABLE users ALTER COLUMN role DROP NOT NULL;
+        END IF;
+      END $$;
     `);
 
     // ── listings ───────────────────────────────────────────────

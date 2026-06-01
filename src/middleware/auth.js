@@ -13,7 +13,7 @@ const authMiddleware = (req, res, next) => {
     if (!decoded) {
       return res.status(401).json({ error: 'Authorization token gerekli.' });
     }
-    req.user = decoded; // { id, phone, role }
+    req.user = decoded; // { id, phone }
     next();
   } catch (err) {
     return res.status(401).json({ error: 'Geçersiz veya süresi dolmuş token.' });
