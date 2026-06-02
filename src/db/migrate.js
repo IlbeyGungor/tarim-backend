@@ -208,6 +208,18 @@ console.log('DB INFO:', dbInfo.rows[0]);
       ALTER TABLE market_price_latest
       ADD COLUMN IF NOT EXISTS history_1y JSONB NOT NULL DEFAULT '[]'::jsonb
     `);
+    
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS device_tokens (
+        id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        token       TEXT NOT NULL,
+        platform    VARCHAR(20) NOT NULL CHECK (platform IN ('ios','android')),
+        created_at  TIMESTAMPTZ DEFAULT NOW(),
+        updated_at  TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(user_id, token)
+      )
+    `);    
 
     // ── Indexes ────────────────────────────────────────────────
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_seller     ON listings(seller_id)`);
