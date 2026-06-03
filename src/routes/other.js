@@ -286,6 +286,45 @@ usersRouter.patch('/me', authMiddleware, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// POST /api/users/me/phone-verification-attempts — SMS başlamadan önce aylık limit kontrolü
+usersRouter.post('/me/phone-verification-attempts', authMiddleware, async (req, res, next) => {
+  try {
+    const phone = String(req.body.phone || '').trim();
+    if (!phone) return res.status(400).json({ error: 'Telefon numarası zorunludur.' });
+
+    const { rows } = await query(`
+      WITH recent AS (
+        SELECT COUNT(*)::int AS attempt_count
+        FROM phone_verification_attempts
+        WHERE user_id=$1
+          AND created_at >= NOW() - INTERVAL '30 days'
+      ),
+      inserted AS (
+        INSERT INTO phone_verification_attempts (user_id, phone)
+        SELECT $1, $2
+        FROM recent
+        WHERE attempt_count < 5
+        RETURNING id
+      )
+      SELECT recent.attempt_count, inserted.id
+      FROM recent
+      LEFT JOIN inserted ON true
+    `, [req.user.id, phone]);
+
+    const result = rows[0];
+    if (!result?.id) {
+      return res.status(429).json({
+        error: 'Telefon numarası doğrulama SMS limitiniz doldu. Bir hesap 30 gün içinde en fazla 5 kez telefon doğrulama SMS’i başlatabilir.',
+      });
+    }
+
+    res.json({
+      ok: true,
+      remaining: Math.max(0, 4 - Number(result.attempt_count || 0)),
+    });
+  } catch (err) { next(err); }
+});
+
 // PATCH /api/users/me/phone — Firebase SMS ile doğrulanmış telefonu kaydet
 usersRouter.patch('/me/phone', authMiddleware, async (req, res, next) => {
   try {
