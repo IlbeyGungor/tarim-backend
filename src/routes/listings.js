@@ -20,6 +20,17 @@ const LISTING_SELECT = `
   JOIN users u ON u.id = l.seller_id
 `;
 
+const reportLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    ok: false,
+    error: 'Çok fazla bildirim denemesi yapıldı. Lütfen daha sonra tekrar deneyin.',
+  },
+});
+
 // GET /api/listings  (public, with optional filters)
 router.get('/', async (req, res, next) => {
   try {
@@ -98,6 +109,48 @@ router.get('/:id', authMiddleware.optional, async (req, res, next) => {
     await query('UPDATE listings SET view_count = view_count + 1 WHERE id=$1', [req.params.id]);
     res.json(listing);
   } catch (err) { next(err); }
+});
+
+// POST /api/listings/:id/reports  (public)
+router.post('/:id/reports', reportLimiter, async (req, res, next) => {
+  try {
+    const { reason, description, listing, reporter } = req.body;
+
+    if (!reason) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Bildirim sebebi zorunludur.',
+      });
+    }
+
+    await mailer.sendMail({
+      from: process.env.SMTP_USER,
+      to: process.env.REPORT_TO_EMAIL || 'ilbey.gungor@outlook.com',
+      subject: 'Tarım Pazar Uygunsuz İçerik Bildirimi',
+      text: `
+Sebep: ${reason}
+Açıklama: ${description || '-'}
+
+İlan ID: ${req.params.id}
+Ürün: ${listing?.crop_name || '-'}
+Fiyat: ${listing?.price || listing?.price_per_unit || '-'}
+Miktar: ${listing?.quantity || '-'}
+Konum: ${listing?.location_display || [listing?.city, listing?.district].filter(Boolean).join(' / ') || '-'}
+Satıcı: ${listing?.seller_name || listing?.seller?.name || '-'} (${listing?.seller_id || listing?.seller?.id || '-'})
+
+Bildiren: ${reporter?.name || 'Misafir'} (${reporter?.id || '-'})
+Telefon: ${reporter?.phone || '-'}
+
+Fotoğraflar:
+${(listing?.image_urls || []).join('\n') || '-'}
+      `,
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Report mail error:', err);
+    next(err);
+  }
 });
 
 // POST /api/listings  (auth required)
