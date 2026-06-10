@@ -3,6 +3,8 @@ const pricesRouter = require('express').Router();
 const admin = require('firebase-admin');
 const { query, getClient } = require('../db');
 const authMiddleware = require('../middleware/auth');
+const { rateLimit } = require('express-rate-limit');
+const mailer = require('../services/mailer');
 
 function ensureFirebaseAdmin() {
   if (admin.apps.length) return;
@@ -234,6 +236,59 @@ pricesRouter.get('/:id/history-1y', async (req, res, next) => {
 
 // ── Users ──────────────────────────────────────────────────────────────────
 const usersRouter = require('express').Router();
+
+const userReportLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    ok: false,
+    error: 'Çok fazla bildirim denemesi yapıldı. Lütfen daha sonra tekrar deneyin.',
+  },
+});
+
+// POST /api/users/:id/reports  (public)
+usersRouter.post('/:id/reports', userReportLimiter, async (req, res, next) => {
+  try {
+    const { reason, description, reportedUser, reporter } = req.body;
+
+    if (!reason) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Bildirim sebebi zorunludur.',
+      });
+    }
+
+    await mailer.sendMail({
+      from: process.env.SMTP_USER,
+      to: process.env.REPORT_TO_EMAIL || 'ilbey.gungor@outlook.com',
+      subject: 'Tarım Pazar Kullanıcı Bildirimi',
+      text: `
+Sebep: ${reason}
+Açıklama: ${description || '-'}
+
+Bildirilen Kullanıcı ID: ${req.params.id}
+Ad Soyad: ${reportedUser?.name || '-'}
+Telefon: ${reportedUser?.phone || '-'}
+Şehir: ${reportedUser?.city || '-'}
+İlçe: ${reportedUser?.district || '-'}
+Rol: ${reportedUser?.role || '-'}
+
+Bildiren: ${reporter?.name || 'Misafir'} (${reporter?.id || '-'})
+Telefon: ${reporter?.phone || '-'}
+
+Profil Fotoğrafı:
+${reportedUser?.profile_image || '-'}
+      `,
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('User report mail error:', err);
+    next(err);
+  }
+});
 
 // GET /api/users/:id  (public profile)
 usersRouter.get('/:id', async (req, res, next) => {
