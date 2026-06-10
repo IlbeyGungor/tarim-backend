@@ -2,6 +2,8 @@ const router = require('express').Router();
 const { body, query: qv, validationResult } = require('express-validator');
 const { query } = require('../db');
 const authMiddleware = require('../middleware/auth');
+const { rateLimit } = require('express-rate-limit');
+const mailer = require('../services/mailer');
 
 // Reusable query to get full listing with seller info
 const LISTING_SELECT = `
