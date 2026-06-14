@@ -10,6 +10,37 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL
 });
 
+function getTodayDateForTurkey() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Istanbul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+
+  const year = parts.find((p) => p.type === "year").value;
+  const month = parts.find((p) => p.type === "month").value;
+  const day = parts.find((p) => p.type === "day").value;
+
+  return `${year}-${month}-${day}`;
+}
+
+function normalizePriceDate(value, fallbackDate) {
+  if (!value) return fallbackDate;
+
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString().slice(0, 10);
+  }
+
+  const str = String(value).trim();
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+    return str;
+  }
+
+  return fallbackDate;
+}
+
 function calcTrend(currentAvg, previousAvg) {
   if (!previousAvg || Number(previousAvg) === 0) return 0;
   return Number(((currentAvg - previousAvg) / previousAvg).toFixed(4));
@@ -17,10 +48,20 @@ function calcTrend(currentAvg, previousAvg) {
 
 async function fetchSourceRows() {
   const adanaRows = await fetchAdanaRows();
+  console.log(`Adana rows: ${adanaRows.length}`);
+
   const izmirRows = await fetchIzmirRows();
+  console.log(`Izmir rows: ${izmirRows.length}`);
+  console.log(`Izmir selected price_date: ${izmirRows[0]?.price_date ?? 'no rows'}`);
+
   const bursaRows = await fetchBursaRows();
+  console.log(`Bursa rows: ${bursaRows.length}`);
+
   const antalyaRows = await fetchAntalyaRows();
+  console.log(`Antalya rows: ${antalyaRows.length}`);
+
   const turkeyRows = await fetchTurkeyRows();
+  console.log(`Turkey rows: ${turkeyRows.length}`);
 
   return [
     ...adanaRows,
@@ -35,13 +76,14 @@ async function run() {
   const client = await pool.connect();
 
   try {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = getTodayDateForTurkey();
     const rows = await fetchSourceRows();
 
     await client.query('BEGIN');
 
     for (const row of rows) {
-      const productionType = row.production_type ?? 'Geleneksel';
+      const productionType = String(row.production_type ?? '').trim() || 'Geleneksel';
+      const priceDate = normalizePriceDate(row.price_date, today);
 
       await client.query(`
         INSERT INTO market_price_history
@@ -78,7 +120,7 @@ async function run() {
         row.max_price,
         row.avg_price,
         row.unit,
-        today
+        priceDate
       ]);
 
       const prev = await client.query(`
@@ -98,7 +140,7 @@ async function run() {
         row.market,
         row.city,
         productionType,
-        today
+        priceDate
       ]);
 
       const prevRow = prev.rows[0];
@@ -139,6 +181,8 @@ async function run() {
           prev_price_date = EXCLUDED.prev_price_date,
           trend = EXCLUDED.trend,
           updated_at = NOW()
+        WHERE market_price_latest.latest_price_date IS NULL
+           OR EXCLUDED.latest_price_date >= market_price_latest.latest_price_date
       `, [
         row.product,
         row.scope,
@@ -150,7 +194,7 @@ async function run() {
         row.max_price,
         row.avg_price,
         row.unit,
-        today,
+        priceDate,
         prevRow?.price_date ?? null,
         trend
       ]);
@@ -158,7 +202,7 @@ async function run() {
 
     await client.query('COMMIT');
 
-    console.log(`market prices updated for ${today}: ${rows.length} rows`);
+    console.log(`market prices updated at ${today}: ${rows.length} rows`);
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('Import failed:', err);

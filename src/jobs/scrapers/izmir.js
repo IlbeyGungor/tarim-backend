@@ -2,8 +2,9 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 
 const BASE_URL = "https://eislem.izmir.bel.tr/tr/HalFiyatlari";
+const MAX_LOOKBACK_DAYS = 7;
 
-function getTodayDateForTurkey() {
+function getDateForTurkeyDaysAgo(daysAgo = 0) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Europe/Istanbul",
     year: "numeric",
@@ -11,11 +12,14 @@ function getTodayDateForTurkey() {
     day: "2-digit",
   }).formatToParts(new Date());
 
-  const year = parts.find((p) => p.type === "year").value;
-  const month = parts.find((p) => p.type === "month").value;
-  const day = parts.find((p) => p.type === "day").value;
+  const year = Number(parts.find((p) => p.type === "year").value);
+  const month = Number(parts.find((p) => p.type === "month").value);
+  const day = Number(parts.find((p) => p.type === "day").value);
 
-  return `${year}-${month}-${day}`;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  date.setUTCDate(date.getUTCDate() - daysAgo);
+
+  return date.toISOString().slice(0, 10);
 }
 
 function buildUrl(pageNumber, dateStr) {
@@ -137,7 +141,7 @@ function extractTotalPages($) {
   return 1;
 }
 
-function parseRowsFromPage($, url) {
+function parseRowsFromPage($, priceDate) {
   const rows = [];
 
   $("tr").each((_, tr) => {
@@ -173,8 +177,10 @@ function parseRowsFromPage($, url) {
     if (!productName || !unit) return;
     if (minPrice === null || maxPrice === null) return;
 
+    const normalizedProduct = normalizeProduct(productName);
+
     rows.push({
-      product: productName,
+      product: normalizedProduct,
       scope: "market",
       market: "İzmir Hali",
       city: "İzmir",
@@ -183,7 +189,8 @@ function parseRowsFromPage($, url) {
       max_price: maxPrice,
       avg_price: (minPrice + maxPrice) / 2,
       unit: unit,
-      icon: getIcon(productName),
+      icon: getIcon(normalizedProduct),
+      price_date: priceDate,
     });
   });
 
@@ -198,36 +205,34 @@ function randomSleepMs(minSeconds = 3, maxSeconds = 8) {
   return Math.floor((Math.random() * (maxSeconds - minSeconds) + minSeconds) * 1000);
 }
 
-async function fetchIzmirRows() {
-  const today = getTodayDateForTurkey();
-
-  const firstUrl = buildUrl(1, today);
+async function fetchIzmirRowsForDate(dateStr) {
+  const firstUrl = buildUrl(1, dateStr);
   const firstHtml = await getHtml(firstUrl);
   const $first = cheerio.load(firstHtml);
 
   const totalPages = extractTotalPages($first);
 
-  console.log(`Bugünün tarihi: ${today}`);
-  console.log(`Toplam sayfa sayısı: ${totalPages}`);
+  console.log(`[Izmir] Tarih deneniyor: ${dateStr}`);
+  console.log(`[Izmir] Toplam sayfa sayısı: ${totalPages}`);
 
   const allRows = [];
 
   for (let page = 1; page <= totalPages; page++) {
-    const url = buildUrl(page, today);
+    const url = buildUrl(page, dateStr);
 
-    console.log(`[${page}/${totalPages}] Scrape ediliyor: ${url}`);
+    console.log(`[Izmir] [${page}/${totalPages}] Scrape ediliyor: ${url}`);
 
     const html = page === 1 ? firstHtml : await getHtml(url);
     const $ = cheerio.load(html);
 
-    const pageRows = parseRowsFromPage($, url);
+    const pageRows = parseRowsFromPage($, dateStr);
     allRows.push(...pageRows);
 
-    console.log(`Bulunan satır: ${pageRows.length}`);
+    console.log(`[Izmir] Bulunan satır: ${pageRows.length}`);
 
     if (page !== totalPages) {
       const waitMs = randomSleepMs(3, 8);
-      console.log(`${(waitMs / 1000).toFixed(1)} saniye bekleniyor...\n`);
+      console.log(`[Izmir] ${(waitMs / 1000).toFixed(1)} saniye bekleniyor...\n`);
       await sleep(waitMs);
     }
   }
@@ -235,6 +240,27 @@ async function fetchIzmirRows() {
   return allRows;
 }
 
+async function fetchIzmirRows() {
+  for (let daysAgo = 0; daysAgo <= MAX_LOOKBACK_DAYS; daysAgo++) {
+    const dateStr = getDateForTurkeyDaysAgo(daysAgo);
+
+    try {
+      const rows = await fetchIzmirRowsForDate(dateStr);
+
+      if (rows.length > 0) {
+        console.log(`[Izmir] Veri bulundu. Seçilen fiyat tarihi: ${dateStr}, satır sayısı: ${rows.length}`);
+        return rows;
+      }
+
+      console.log(`[Izmir] ${dateStr} için veri bulunamadı.`);
+    } catch (err) {
+      console.warn(`[Izmir] ${dateStr} scrape edilemedi: ${err.message}`);
+    }
+  }
+
+  console.warn(`[Izmir] Son ${MAX_LOOKBACK_DAYS + 1} gün içinde veri bulunamadı.`);
+  return [];
+}
 
 module.exports = {
   fetchIzmirRows
