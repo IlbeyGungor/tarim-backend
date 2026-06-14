@@ -177,13 +177,13 @@ function parseRowsFromPage($, priceDate) {
     // 4: max fiyat
     // 5: ortalama fiyat
     if (cells.length >= 6) {
-      productName = $(cells[1]).text();
+      productName = $(cells[1]).text().replace(/\s+/g, " ").trim();;
       unit = normalizeUnit($(cells[2]).text());
       minPrice = parsePrice($(cells[3]).text());
       maxPrice = parsePrice($(cells[4]).text());
     } else {
       // Yedek yapı
-      productName = $(cells[0]).text();
+      productName = $(cells[0]).text().replace(/\s+/g, " ").trim();;
       unit = normalizeUnit($(cells[1]).text());
       minPrice = parsePrice($(cells[2]).text());
       maxPrice = parsePrice($(cells[3]).text());
@@ -195,7 +195,7 @@ function parseRowsFromPage($, priceDate) {
     rows.push({
       product: productName,
       scope: "market",
-      market: "İzmir",
+      market: "İzmir Hali",
       city: "İzmir",
       production_type: "Geleneksel",
       min_price: minPrice,
