@@ -263,5 +263,6 @@ async function fetchIzmirRows() {
 }
 
 module.exports = {
-  fetchIzmirRows
+  fetchIzmirRows,
+  fetchIzmirRowsForDate
 };
