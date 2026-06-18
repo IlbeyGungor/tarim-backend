@@ -18,12 +18,49 @@ const PORT = process.env.PORT || 3000;
 const uploadRoutes = require('./routes/upload');
 const tokenRoutes = require('./routes/tokens');
 
+const defaultCorsOrigins = [
+  'https://tarim-pazar.com',
+  'https://www.tarim-pazar.com',
+  'https://tarim-pazar.web.app',
+  'https://tarim-pazar.firebaseapp.com',
+  'http://localhost:3000',
+  'http://localhost:5000',
+  'http://localhost:8080',
+  'http://localhost:8081',
+];
+const corsOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const allowedCorsOrigins = new Set([
+  ...defaultCorsOrigins,
+  ...corsOrigins,
+]);
+
+function isAllowedCorsOrigin(origin) {
+  if (allowedCorsOrigins.has(origin)) return true;
+
+  try {
+    const { protocol, hostname } = new URL(origin);
+    return (
+      (protocol === 'http:' || protocol === 'https:') &&
+      (hostname === 'localhost' || hostname === '127.0.0.1')
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
 // Security & parsing
 app.use(helmet());
 app.use(cors({
-  origin: process.env.NODE_ENV === 'production'
-    ? ['https://yourapp.com']
-    : '*',
+  origin(origin, callback) {
+    if (!origin || process.env.NODE_ENV !== 'production') {
+      callback(null, true);
+      return;
+    }
+    callback(null, isAllowedCorsOrigin(origin));
+  },
   methods: ['GET','POST','PATCH','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization'],
 }));
