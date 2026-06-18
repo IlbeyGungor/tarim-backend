@@ -19,6 +19,7 @@ const uploadRoutes = require('./routes/upload');
 const tokenRoutes = require('./routes/tokens');
 
 const defaultCorsOrigins = [
+  'https://app.tarim-pazar.com',
   'https://tarim-pazar.com',
   'https://www.tarim-pazar.com',
   'https://tarim-pazar.web.app',
