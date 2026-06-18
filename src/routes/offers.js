@@ -5,6 +5,12 @@ const { query, getClient } = require('../db');
 const authMiddleware = require('../middleware/auth');
 const notify = require('../utils/notify');
 
+function sendNotification(type, promise) {
+  promise.catch((err) => {
+    console.error(`[notification] ${type} failed:`, err);
+  });
+}
+
 function chatAccessWhere(alias = 'o') {
   return `(
     (${alias}.buyer_id = $1 AND ${alias}.buyer_chat_deleted_at IS NULL)
@@ -95,9 +101,12 @@ router.post('/:id/reviews', authMiddleware, [
     await client.query('BEGIN');
     const { reviewee_id, rating, message } = req.body;
     const { rows: offerRows } = await client.query(`
-      SELECT o.id, o.buyer_id, l.seller_id
+      SELECT o.id, o.buyer_id, l.seller_id,
+             buyer.name AS buyer_name, seller.name AS seller_name
       FROM offers o
       JOIN listings l ON l.id = o.listing_id
+      JOIN users buyer ON buyer.id = o.buyer_id
+      JOIN users seller ON seller.id = l.seller_id
       WHERE o.id=$1 AND o.status='accepted'
     `, [req.params.id]);
     if (!offerRows.length) {
@@ -134,6 +143,13 @@ router.post('/:id/reviews', authMiddleware, [
     `, [reviewee_id]);
 
     await client.query('COMMIT');
+    const reviewerName = isBuyer ? offer.buyer_name : offer.seller_name;
+    sendNotification('reviewReceived', notify.reviewReceived({
+      revieweeId: reviewee_id,
+      reviewerName,
+      rating,
+      offerId: req.params.id,
+    }));
     res.status(201).json(rows[0]);
   } catch (err) {
     await client.query('ROLLBACK');
@@ -217,7 +233,7 @@ router.post('/', authMiddleware, [
 
     await client.query('COMMIT');
 
-    notify.newOffer({
+    sendNotification('newOffer', notify.newOffer({
       sellerId:      listing.seller_id,
       buyerName:     buyerRows[0]?.name || 'Bir alıcı',
       cropName:      listing.crop_name,
@@ -225,7 +241,7 @@ router.post('/', authMiddleware, [
       unit:          listing.unit,
       offerId:       rows[0].id,
       listingId:     listing_id,
-    });
+    }));
 
     res.status(201).json(rows[0]);
   } catch (err) { await client.query('ROLLBACK'); next(err); } finally { client.release(); }
@@ -241,6 +257,7 @@ router.patch('/:id/respond', authMiddleware, [
   try {
     await client.query('BEGIN');
     const { status, counter_price } = req.body;
+    let autoRejectedOffers = [];
 
     const { rows: offerRows } = await client.query(`
       SELECT o.*, l.seller_id, l.crop_name, l.unit, l.status AS listing_status,
@@ -281,34 +298,45 @@ router.patch('/:id/respond', authMiddleware, [
             updated_at=NOW()
         WHERE id=$1
       `, [offer.listing_id]);
-      await client.query(`
+      const { rows: rejectedRows } = await client.query(`
         UPDATE offers
         SET status='rejected', updated_at=NOW()
         WHERE listing_id=$1
           AND id<>$2
           AND status IN ('pending','countered')
+        RETURNING id, buyer_id
       `, [offer.listing_id, req.params.id]);
+      autoRejectedOffers = rejectedRows;
     }
 
     await client.query('COMMIT');
 
     if (status === 'accepted') {
-      notify.offerAccepted({
+      sendNotification('offerAccepted', notify.offerAccepted({
         buyerId: offer.buyer_id,
         sellerName: offer.seller_name,
         cropName: offer.crop_name,
         offerId: req.params.id,
         listingId: offer.listing_id,
+      }));
+      autoRejectedOffers.forEach((rejectedOffer) => {
+        sendNotification('offerRejectedByAcceptedOther', notify.offerRejectedByAcceptedOther({
+          buyerId: rejectedOffer.buyer_id,
+          sellerName: offer.seller_name,
+          cropName: offer.crop_name,
+          offerId: rejectedOffer.id,
+          listingId: offer.listing_id,
+        }));
       });
     } else if (status === 'rejected') {
-      notify.offerRejected({
+      sendNotification('offerRejected', notify.offerRejected({
         buyerId: offer.buyer_id,
         cropName: offer.crop_name,
         offerId: req.params.id,
         listingId: offer.listing_id,
-      });
+      }));
     } else if (status === 'countered') {
-      notify.counterOffer({
+      sendNotification('counterOffer', notify.counterOffer({
         recipientId: offer.buyer_id,
         senderName: offer.seller_name,
         cropName: offer.crop_name,
@@ -317,7 +345,7 @@ router.patch('/:id/respond', authMiddleware, [
         offerId: req.params.id,
         madeBy: 'seller',
         listingId: offer.listing_id,
-      });
+      }));
     }
 
     res.json(rows[0]);
@@ -334,6 +362,7 @@ router.patch('/:id/buyer-respond', authMiddleware, [
   try {
     await client.query('BEGIN');
     const { status, counter_price } = req.body;
+    let autoRejectedOffers = [];
 
     const { rows: offerRows } = await client.query(`
       SELECT o.*, l.seller_id, l.crop_name, l.unit, l.status AS listing_status,
@@ -378,34 +407,45 @@ router.patch('/:id/buyer-respond', authMiddleware, [
             updated_at=NOW()
         WHERE id=$1
       `, [offer.listing_id]);
-      await client.query(`
+      const { rows: rejectedRows } = await client.query(`
         UPDATE offers
         SET status='rejected', updated_at=NOW()
         WHERE listing_id=$1
           AND id<>$2
           AND status IN ('pending','countered')
+        RETURNING id, buyer_id
       `, [offer.listing_id, req.params.id]);
+      autoRejectedOffers = rejectedRows;
     }
 
     await client.query('COMMIT');
 
     if (status === 'accepted') {
-      notify.offerAccepted({
+      sendNotification('offerAccepted', notify.offerAccepted({
         buyerId: offer.seller_id,
         sellerName: offer.buyer_name,
         cropName: offer.crop_name,
         offerId: req.params.id,
         listingId: offer.listing_id,
+      }));
+      autoRejectedOffers.forEach((rejectedOffer) => {
+        sendNotification('offerRejectedByAcceptedOther', notify.offerRejectedByAcceptedOther({
+          buyerId: rejectedOffer.buyer_id,
+          sellerName: offer.seller_name,
+          cropName: offer.crop_name,
+          offerId: rejectedOffer.id,
+          listingId: offer.listing_id,
+        }));
       });
     } else if (status === 'rejected') {
-      notify.offerRejected({
+      sendNotification('offerRejected', notify.offerRejected({
         buyerId: offer.seller_id,
         cropName: offer.crop_name,
         offerId: req.params.id,
         listingId: offer.listing_id,
-      });
+      }));
     } else if (status === 'countered') {
-      notify.finalOffer({
+      sendNotification('finalOffer', notify.finalOffer({
         sellerId: offer.seller_id,
         buyerName: offer.buyer_name,
         cropName: offer.crop_name,
@@ -413,7 +453,7 @@ router.patch('/:id/buyer-respond', authMiddleware, [
         unit: offer.unit,
         offerId: req.params.id,
         listingId: offer.listing_id,
-      });
+      }));
     }
 
     res.json(rows[0]);
@@ -500,13 +540,13 @@ router.patch('/:id/cancel-counter', authMiddleware, async (req, res, next) => {
 
     const recipientId = isSeller ? offer.buyer_id : offer.seller_id;
     const senderName  = isSeller ? offer.seller_name : offer.buyer_name;
-    notify.counterCancelled({
+    sendNotification('counterCancelled', notify.counterCancelled({
       recipientId,
       senderName,
       cropName: offer.crop_name,
       offerId: req.params.id,
       listingId: offer.listing_id,
-    });
+    }));
 
     res.json(rows[0]);
   } catch (err) { await client.query('ROLLBACK'); next(err); } finally { client.release(); }
@@ -618,9 +658,12 @@ router.delete('/:id', authMiddleware, async (req, res, next) => {
 
 async function requireAcceptedChatParticipant(offerId, userId) {
   const { rows } = await query(`
-    SELECT o.id, o.buyer_id, l.seller_id
+    SELECT o.id, o.buyer_id, l.seller_id, o.listing_id,
+           buyer.name AS buyer_name, seller.name AS seller_name
     FROM offers o
     JOIN listings l ON l.id = o.listing_id
+    JOIN users buyer ON buyer.id = o.buyer_id
+    JOIN users seller ON seller.id = l.seller_id
     WHERE o.id=$1 AND o.status='accepted'
   `, [offerId]);
   if (!rows.length) return null;
@@ -660,6 +703,14 @@ router.post('/:id/messages', authMiddleware, [
     );
     const clearColumn = offer.buyer_id === req.user.id ? 'seller_chat_deleted_at' : 'buyer_chat_deleted_at';
     await query(`UPDATE offers SET ${clearColumn}=NULL, updated_at=NOW() WHERE id=$1`, [req.params.id]);
+    const isBuyer = offer.buyer_id === req.user.id;
+    sendNotification('chatMessage', notify.chatMessage({
+      recipientId: isBuyer ? offer.seller_id : offer.buyer_id,
+      senderName: isBuyer ? offer.buyer_name : offer.seller_name,
+      text: req.body.text,
+      offerId: req.params.id,
+      listingId: offer.listing_id,
+    }));
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
 });

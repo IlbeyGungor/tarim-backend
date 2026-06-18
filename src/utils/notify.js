@@ -26,6 +26,12 @@ function initFirebase() {
 
 initFirebase();
 
+function notificationData(data) {
+  return Object.fromEntries(
+    Object.entries(data).map(([key, value]) => [key, String(value)])
+  );
+}
+
 async function sendToUser(userId, { title, body, data = {} }) {
   if (!initialized) return;
 
@@ -40,7 +46,10 @@ async function sendToUser(userId, { title, body, data = {} }) {
 
     const message = {
       notification: { title, body },
-      data: { ...data, click_action: 'FLUTTER_NOTIFICATION_CLICK' },
+      data: notificationData({
+        ...data,
+        click_action: 'FLUTTER_NOTIFICATION_CLICK',
+      }),
       apns: {
         payload: {
           aps: {
@@ -84,7 +93,7 @@ const notify = {
     await sendToUser(sellerId, {
       title: '🌾 Yeni Teklif Aldınız',
       body: `${buyerName}, "${cropName}" ilanınıza ₺${parseFloat(offeredPrice).toFixed(2)}/${unit} teklif etti.`,
-      data: { type: 'new_offer', offer_id: offerId, listing_id: listingId },
+      data: { type: 'new_offer', offer_id: String(offerId), listing_id: String(listingId) },
     });
   },
 
@@ -92,7 +101,7 @@ const notify = {
     await sendToUser(buyerId, {
       title: '✅ Teklifiniz Kabul Edildi!',
       body: `${sellerName}, "${cropName}" için teklifinizi kabul etti. İletişime geçebilirsiniz.`,
-      data: { type: 'offer_accepted', offer_id: offerId, listing_id: listingId },
+      data: { type: 'offer_accepted', offer_id: String(offerId), listing_id: String(listingId) },
     });
   },
 
@@ -100,7 +109,15 @@ const notify = {
     await sendToUser(buyerId, {
       title: '❌ Teklifiniz Reddedildi',
       body: `"${cropName}" için verdiğiniz teklif reddedildi. Yeni bir teklif verebilirsiniz.`,
-      data: { type: 'offer_rejected', offer_id: offerId, listing_id: listingId },
+      data: { type: 'offer_rejected', offer_id: String(offerId), listing_id: String(listingId) },
+    });
+  },
+
+  async offerRejectedByAcceptedOther({ buyerId, sellerName, cropName, offerId, listingId }) {
+    await sendToUser(buyerId, {
+      title: '❌ Teklifiniz Reddedildi',
+      body: `${sellerName}, "${cropName}" ilanında başka bir teklifi kabul etti. Teklifiniz otomatik olarak reddedildi.`,
+      data: { type: 'offer_rejected_other_accepted', offer_id: String(offerId), listing_id: String(listingId) },
     });
   },
 
@@ -109,7 +126,7 @@ const notify = {
     await sendToUser(recipientId, {
       title: '🔄 Karşı Teklif Geldi',
       body: `${who} ${senderName}, "${cropName}" için ₺${parseFloat(counterPrice).toFixed(2)}/${unit} karşı teklif yaptı.`,
-      data: { type: 'counter_offer', offer_id: offerId, listing_id: listingId },
+      data: { type: 'counter_offer', offer_id: String(offerId), listing_id: String(listingId) },
     });
   },
 
@@ -117,7 +134,7 @@ const notify = {
     await sendToUser(sellerId, {
       title: '⚡ Son Teklif Geldi',
       body: `${buyerName}, "${cropName}" için son teklifini yaptı: ₺${parseFloat(finalPrice).toFixed(2)}/${unit}`,
-      data: { type: 'final_offer', offer_id: offerId, listing_id: listingId },
+      data: { type: 'final_offer', offer_id: String(offerId), listing_id: String(listingId) },
     });
   },
 
@@ -125,7 +142,25 @@ const notify = {
     await sendToUser(recipientId, {
       title: '↩️ Karşı Teklif Geri Alındı',
       body: `${senderName}, "${cropName}" için yaptığı karşı teklifi geri aldı. Yeni teklif beklenebilir.`,
-      data: { type: 'counter_cancelled', offer_id: offerId, listing_id: listingId },
+      data: { type: 'counter_cancelled', offer_id: String(offerId), listing_id: String(listingId) },
+    });
+  },
+
+  async chatMessage({ recipientId, senderName, text, offerId, listingId }) {
+    const cleanText = String(text || '').trim();
+    const preview = cleanText.length > 80 ? `${cleanText.slice(0, 77)}...` : cleanText;
+    await sendToUser(recipientId, {
+      title: `💬 ${senderName}`,
+      body: preview || 'Yeni mesajınız var.',
+      data: { type: 'chat_message', offer_id: String(offerId), listing_id: String(listingId) },
+    });
+  },
+
+  async reviewReceived({ revieweeId, reviewerName, rating, offerId }) {
+    await sendToUser(revieweeId, {
+      title: '⭐ Yeni Değerlendirme Aldınız',
+      body: `${reviewerName}, size ${rating}/5 puan verdi ve değerlendirme yazdı.`,
+      data: { type: 'review_received', offer_id: String(offerId) },
     });
   },
 };
