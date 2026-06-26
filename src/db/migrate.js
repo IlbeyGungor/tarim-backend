@@ -126,10 +126,20 @@ console.log('DB INFO:', dbInfo.rows[0]);
         offer_id    UUID NOT NULL REFERENCES offers(id) ON DELETE CASCADE,
         sender_id   UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         text        TEXT NOT NULL,
+        action_type VARCHAR(30) DEFAULT 'chat',
+        price_snapshot NUMERIC(10,2),
+        quantity_snapshot NUMERIC(12,2),
+        unit_snapshot VARCHAR(20),
         is_read     BOOLEAN DEFAULT FALSE,
-        created_at  TIMESTAMPTZ DEFAULT NOW()
+        created_at  TIMESTAMPTZ DEFAULT NOW(),
+        updated_at  TIMESTAMPTZ DEFAULT NOW()
       )
     `);
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS action_type VARCHAR(30) DEFAULT 'chat'`);
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS price_snapshot NUMERIC(10,2)`);
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS quantity_snapshot NUMERIC(12,2)`);
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS unit_snapshot VARCHAR(20)`);
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`);
 
     // ── reviews ────────────────────────────────────────────────
     await client.query(`

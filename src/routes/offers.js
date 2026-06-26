@@ -18,6 +18,90 @@ function chatAccessWhere(alias = 'o') {
   )`;
 }
 
+function optionalText(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+async function insertOfferTimelineMessage(client, {
+  offerId,
+  senderId,
+  text,
+  actionType,
+  price,
+  quantity,
+  unit,
+}) {
+  const { rows } = await client.query(`
+    INSERT INTO messages (
+      offer_id,
+      sender_id,
+      text,
+      action_type,
+      price_snapshot,
+      quantity_snapshot,
+      unit_snapshot
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7)
+    RETURNING *
+  `, [
+    offerId,
+    senderId,
+    optionalText(text),
+    actionType,
+    price ?? null,
+    quantity ?? null,
+    unit ?? null,
+  ]);
+  return rows[0];
+}
+
+async function upsertLatestOfferTimelineMessage(client, {
+  offerId,
+  senderId,
+  text,
+  textProvided = true,
+  actionType,
+  price,
+  quantity,
+  unit,
+}) {
+  const { rows } = await client.query(`
+    UPDATE messages
+    SET text=CASE WHEN $8 THEN $1 ELSE text END,
+        price_snapshot=$2,
+        quantity_snapshot=$3,
+        unit_snapshot=$4,
+        updated_at=NOW()
+    WHERE id = (
+      SELECT id
+      FROM messages
+      WHERE offer_id=$5 AND sender_id=$6 AND action_type=$7
+      ORDER BY created_at DESC
+      LIMIT 1
+    )
+    RETURNING *
+  `, [
+    optionalText(text),
+    price ?? null,
+    quantity ?? null,
+    unit ?? null,
+    offerId,
+    senderId,
+    actionType,
+    textProvided,
+  ]);
+  if (rows.length) return rows[0];
+  return insertOfferTimelineMessage(client, {
+    offerId,
+    senderId,
+    text,
+    actionType,
+    price,
+    quantity,
+    unit,
+  });
+}
+
 // GET /api/offers/chats — accepted offer chats for current user
 router.get('/chats', authMiddleware, async (req, res, next) => {
   try {
@@ -48,7 +132,17 @@ router.get('/chats', authMiddleware, async (req, res, next) => {
       JOIN users buyer ON buyer.id = o.buyer_id
       JOIN users seller ON seller.id = l.seller_id
       LEFT JOIN LATERAL (
-        SELECT text, created_at
+        SELECT
+          COALESCE(
+            NULLIF(text, ''),
+            CASE action_type
+              WHEN 'initial_offer' THEN 'Teklif verildi'
+              WHEN 'seller_counter' THEN 'Karşı teklif verildi'
+              WHEN 'buyer_counter' THEN 'Son teklif verildi'
+              ELSE NULL
+            END
+          ) AS text,
+          created_at
         FROM messages
         WHERE offer_id = o.id
         ORDER BY created_at DESC
@@ -227,6 +321,16 @@ router.post('/', authMiddleware, [
       VALUES ($1,$2,$3,$4,$5) RETURNING *
     `, [listing_id, req.user.id, offered_price, quantity, message||null]);
 
+    await insertOfferTimelineMessage(client, {
+      offerId: rows[0].id,
+      senderId: req.user.id,
+      text: message,
+      actionType: 'initial_offer',
+      price: offered_price,
+      quantity,
+      unit: listing.unit,
+    });
+
     await client.query('UPDATE listings SET offer_count=offer_count+1 WHERE id=$1', [listing_id]);
 
     const { rows: buyerRows } = await client.query('SELECT name FROM users WHERE id=$1', [req.user.id]);
@@ -256,7 +360,7 @@ router.patch('/:id/respond', authMiddleware, [
   const client = await getClient();
   try {
     await client.query('BEGIN');
-    const { status, counter_price } = req.body;
+    const { status, counter_price, message } = req.body;
     let autoRejectedOffers = [];
 
     const { rows: offerRows } = await client.query(`
@@ -288,6 +392,18 @@ router.patch('/:id/respond', authMiddleware, [
       UPDATE offers SET status=$1, counter_price=$2, counter_by=$3, updated_at=NOW()
       WHERE id=$4 RETURNING *
     `, [status, status === 'countered' ? counter_price : null, counterBy, req.params.id]);
+
+    if (status === 'countered') {
+      await insertOfferTimelineMessage(client, {
+        offerId: req.params.id,
+        senderId: req.user.id,
+        text: message,
+        actionType: 'seller_counter',
+        price: counter_price,
+        quantity: offer.quantity,
+        unit: offer.unit,
+      });
+    }
 
     if (status === 'accepted') {
       await client.query(`
@@ -361,7 +477,7 @@ router.patch('/:id/buyer-respond', authMiddleware, [
   const client = await getClient();
   try {
     await client.query('BEGIN');
-    const { status, counter_price } = req.body;
+    const { status, counter_price, message } = req.body;
     let autoRejectedOffers = [];
 
     const { rows: offerRows } = await client.query(`
@@ -397,6 +513,18 @@ router.patch('/:id/buyer-respond', authMiddleware, [
       UPDATE offers SET status=$1, counter_price=$2, counter_by=$3, updated_at=NOW()
       WHERE id=$4 RETURNING *
     `, [status, status === 'countered' ? counter_price : null, counterBy, req.params.id]);
+
+    if (status === 'countered') {
+      await insertOfferTimelineMessage(client, {
+        offerId: req.params.id,
+        senderId: req.user.id,
+        text: message,
+        actionType: 'buyer_counter',
+        price: counter_price,
+        quantity: offer.quantity,
+        unit: offer.unit,
+      });
+    }
 
     if (status === 'accepted') {
       await client.query(`
@@ -469,9 +597,10 @@ router.patch('/:id/edit-counter', authMiddleware, [
   const client = await getClient();
   try {
     await client.query('BEGIN');
-    const { counter_price } = req.body;
+    const { counter_price, message } = req.body;
+    const textProvided = Object.prototype.hasOwnProperty.call(req.body, 'message');
     const { rows: offerRows } = await client.query(
-      'SELECT o.*, l.seller_id FROM offers o JOIN listings l ON l.id=o.listing_id WHERE o.id=$1',
+      'SELECT o.*, l.seller_id, l.unit FROM offers o JOIN listings l ON l.id=o.listing_id WHERE o.id=$1',
       [req.params.id]
     );
     if (!offerRows.length) {
@@ -494,6 +623,16 @@ router.patch('/:id/edit-counter', authMiddleware, [
       'UPDATE offers SET counter_price=$1, updated_at=NOW() WHERE id=$2 RETURNING *',
       [counter_price, req.params.id]
     );
+    await upsertLatestOfferTimelineMessage(client, {
+      offerId: req.params.id,
+      senderId: req.user.id,
+      text: message,
+      textProvided,
+      actionType: isSeller ? 'seller_counter' : 'buyer_counter',
+      price: counter_price,
+      quantity: offerRows[0].quantity,
+      unit: offerRows[0].unit,
+    });
     await client.query('COMMIT');
     res.json(rows[0]);
   } catch (err) { await client.query('ROLLBACK'); next(err); } finally { client.release(); }
@@ -672,11 +811,27 @@ async function requireAcceptedChatParticipant(offerId, userId) {
   return offer;
 }
 
+async function requireOfferParticipant(offerId, userId) {
+  const { rows } = await query(`
+    SELECT o.id, o.buyer_id, l.seller_id, o.listing_id,
+           buyer.name AS buyer_name, seller.name AS seller_name
+    FROM offers o
+    JOIN listings l ON l.id = o.listing_id
+    JOIN users buyer ON buyer.id = o.buyer_id
+    JOIN users seller ON seller.id = l.seller_id
+    WHERE o.id=$1
+  `, [offerId]);
+  if (!rows.length) return null;
+  const offer = rows[0];
+  if (offer.buyer_id !== userId && offer.seller_id !== userId) return null;
+  return offer;
+}
+
 // GET /api/offers/:id/messages
 router.get('/:id/messages', authMiddleware, async (req, res, next) => {
   try {
-    const offer = await requireAcceptedChatParticipant(req.params.id, req.user.id);
-    if (!offer) return res.status(404).json({ error: 'Sohbet bulunamadı.' });
+    const offer = await requireOfferParticipant(req.params.id, req.user.id);
+    if (!offer) return res.status(404).json({ error: 'Mesaj geçmişi bulunamadı.' });
 
     const { rows } = await query(`
       SELECT m.*, json_build_object('id',u.id,'name',u.name) AS sender

@@ -132,6 +132,8 @@ async function fetchBursaRows() {
     const productName = rawProduct;
     const unit = normalizeUnit(rawUnit);
 
+    if (unit !== "kg") return;
+
     const { minPrice, maxPrice } = parsePriceRange(rawPriceText);
 
     if (!productName || !unit) return;
