@@ -83,6 +83,10 @@ function getIcon(productName) {
 }
 
 async function fetchAntalyaRows() {
+  
+  console.warn("⚠️ Antalya scraper geçici olarak devre dışı bırakıldı. Antalya Belediyesi artık PDF yapısına geçtiği için boş veri dönülüyor.");
+  return [];
+  
   const browser = await puppeteer.launch({
     headless: "new",
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
