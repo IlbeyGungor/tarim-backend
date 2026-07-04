@@ -4,6 +4,7 @@ const { fetchAdanaRows } = require("./scrapers/adana");
 const { fetchIzmirRows } = require("./scrapers/izmir");
 const { fetchBursaRows } = require("./scrapers/bursa");
 const { fetchAntalyaRows } = require("./scrapers/antalya");
+const { fetchCanakkaleRows } = require("./scrapers/canakkale");
 const { fetchTurkeyRows } = require("./scrapers/turkiye");
 
 const pool = new Pool({
@@ -63,12 +64,17 @@ async function fetchSourceRows() {
   const turkeyRows = await fetchTurkeyRows();
   console.log(`Turkey rows: ${turkeyRows.length}`);
 
+  const canakkaleRows = await fetchCanakkaleRows();
+  console.log(`Canakkale rows: ${canakkaleRows.length}`);
+  console.log(`Canakkale selected price_date: ${canakkaleRows[0]?.price_date ?? 'no rows'}`);
+
   return [
     ...adanaRows,
     ...izmirRows,
     ...bursaRows,
     ...antalyaRows,
-    ...turkeyRows
+    ...turkeyRows,
+    ...canakkaleRows
   ];
 }
 
