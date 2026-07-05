@@ -186,7 +186,7 @@ router.delete('/:id/chat', authMiddleware, async (req, res, next) => {
 router.post('/:id/reviews', authMiddleware, [
   body('reviewee_id').notEmpty(),
   body('rating').isInt({ min: 1, max: 5 }),
-  body('message').trim().notEmpty(),
+  body('message').optional({ nullable: true }).trim(),
 ], async (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
@@ -226,7 +226,13 @@ router.post('/:id/reviews', authMiddleware, [
       INSERT INTO reviews (offer_id, reviewer_id, reviewee_id, rating, message)
       VALUES ($1,$2,$3,$4,$5)
       RETURNING *
-    `, [req.params.id, req.user.id, reviewee_id, rating, message.trim()]);
+    `, [
+      req.params.id,
+      req.user.id,
+      reviewee_id,
+      rating,
+      String(message || '').trim() || null,
+    ]);
 
     await client.query(`
       UPDATE users

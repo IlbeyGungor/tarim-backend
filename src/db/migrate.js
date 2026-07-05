@@ -149,11 +149,12 @@ console.log('DB INFO:', dbInfo.rows[0]);
         reviewer_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         reviewee_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         rating       INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
-        message      TEXT NOT NULL,
+        message      TEXT,
         created_at   TIMESTAMPTZ DEFAULT NOW(),
         UNIQUE (reviewer_id, reviewee_id)
       )
     `);
+    await client.query(`ALTER TABLE reviews ALTER COLUMN message DROP NOT NULL`);
 
     // ── market_prices ──────────────────────────────────────────
     await client.query(`
