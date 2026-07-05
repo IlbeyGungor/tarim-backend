@@ -64,9 +64,12 @@ function cleanText(value) {
 }
 
 function extractPriceDate($) {
-  const allText = $("tbody").text();
+  const html = $.html();
+  const text = $.root().text();
 
-  const match = allText.match(/\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b/);
+  const match =
+    html.match(/\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b/) ||
+    text.match(/\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b/);
 
   if (!match) {
     throw new Error("Fiyat tarihi bulunamadı.");
@@ -96,7 +99,7 @@ function parseRowsFromPage($, priceDate) {
   const rows = [];
   let currentSection = null;
 
-  $("tbody tr").each((_, tr) => {
+  $("tr").each((_, tr) => {
     const cells = $(tr)
       .find("td")
       .map((_, td) => cleanText($(td).text()))
