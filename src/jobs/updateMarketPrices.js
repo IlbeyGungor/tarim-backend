@@ -5,6 +5,7 @@ const { fetchIzmirRows } = require("./scrapers/izmir");
 const { fetchBursaRows } = require("./scrapers/bursa");
 const { fetchAntalyaRows } = require("./scrapers/antalya");
 const { fetchCanakkaleRows } = require("./scrapers/canakkale");
+const { fetchKocaeliRows } = require("./scrapers/kocaeli");
 const { fetchTurkeyRows } = require("./scrapers/turkiye");
 
 const pool = new Pool({
@@ -47,6 +48,22 @@ function calcTrend(currentAvg, previousAvg) {
   return Number(((currentAvg - previousAvg) / previousAvg).toFixed(4));
 }
 
+const SOURCE_TIMEOUT_MS = 90 * 1000;
+
+function withTimeout(promise, ms, label) {
+  let timeoutId;
+
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(`${label} ${ms / 1000} saniye içinde tamamlanmadı`));
+    }, ms);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    clearTimeout(timeoutId);
+  });
+}
+
 async function fetchSourceRows() {
   const adanaRows = await fetchAdanaRows();
   console.log(`Adana rows: ${adanaRows.length}`);
@@ -68,12 +85,28 @@ async function fetchSourceRows() {
   console.log(`Canakkale rows: ${canakkaleRows.length}`);
   console.log(`Canakkale selected price_date: ${canakkaleRows[0]?.price_date ?? 'no rows'}`);
 
+  let kocaeliRows = [];
+
+  try {
+    kocaeliRows = await withTimeout(
+      fetchKocaeliRows(),
+      SOURCE_TIMEOUT_MS,
+      "Kocaeli scrape"
+    );
+  } catch (err) {
+    console.warn(`Kocaeli rows skipped: ${err.message}`);
+  }
+
+  console.log(`Kocaeli rows: ${kocaeliRows.length}`);
+  console.log(`Kocaeli selected price_date: ${kocaeliRows[0]?.price_date ?? 'no rows'}`);
+  
   return [
     ...adanaRows,
     ...izmirRows,
     ...bursaRows,
     ...antalyaRows,
     ...turkeyRows,
+    ...kocaeliRows,
     ...canakkaleRows
   ];
 }
