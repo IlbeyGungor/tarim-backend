@@ -36,7 +36,7 @@ console.log('DB INFO:', dbInfo.rows[0]);
         is_verified     BOOLEAN DEFAULT FALSE,
         rating          NUMERIC(3,2) DEFAULT 0.0,
         total_trades    INTEGER DEFAULT 0,
-        profile_image   VARCHAR(255),
+        profile_image   TEXT,
         created_at      TIMESTAMPTZ DEFAULT NOW(),
         updated_at      TIMESTAMPTZ DEFAULT NOW()
       )
@@ -44,7 +44,9 @@ console.log('DB INFO:', dbInfo.rows[0]);
 
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_verified BOOLEAN DEFAULT FALSE`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS firebase_uid VARCHAR(128) UNIQUE`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image TEXT`);
     await client.query(`ALTER TABLE users ALTER COLUMN phone DROP NOT NULL`);
+    await client.query(`ALTER TABLE users ALTER COLUMN profile_image TYPE TEXT`);
     await client.query(`
       DO $$
       BEGIN

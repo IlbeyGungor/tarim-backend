@@ -5,6 +5,23 @@ const { query, getClient } = require('../db');
 const authMiddleware = require('../middleware/auth');
 const { rateLimit } = require('express-rate-limit');
 const mailer = require('../services/mailer');
+const multer = require('multer');
+const { v2: cloudinary } = require('cloudinary');
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+const profileImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) cb(null, true);
+    else cb(new Error('Sadece görsel dosyaları kabul edilir.'));
+  },
+});
 
 function ensureFirebaseAdmin() {
   if (admin.apps.length) return;
@@ -236,6 +253,51 @@ pricesRouter.get('/:id/history-1y', async (req, res, next) => {
 
 // ── Users ──────────────────────────────────────────────────────────────────
 const usersRouter = require('express').Router();
+
+// POST /api/users/me/profile-image  (auth required)
+usersRouter.post(
+  '/me/profile-image',
+  authMiddleware,
+  profileImageUpload.single('image'),
+  async (req, res, next) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: 'Görsel seçilmedi.' });
+      }
+
+      const imageUrl = await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          {
+            folder: `tarim-pazar/users/${req.user.id}`,
+            transformation: [
+              { width: 512, height: 512, crop: 'fill', gravity: 'auto' },
+              { quality: 'auto:good' },
+              { fetch_format: 'auto' },
+            ],
+          },
+          (error, result) => {
+            if (error) reject(error);
+            else resolve(result.secure_url);
+          }
+        );
+        stream.end(req.file.buffer);
+      });
+
+      const { rows } = await query(
+        `UPDATE users
+         SET profile_image=$1, updated_at=NOW()
+         WHERE id=$2
+         RETURNING id,name,phone,phone_verified,city,district,bio,tc_verified,cks_verified,
+                   is_verified,rating,total_trades,profile_image,created_at`,
+        [imageUrl, req.user.id]
+      );
+
+      res.json(rows[0]);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 const userReportLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
