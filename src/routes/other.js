@@ -310,6 +310,57 @@ const userReportLimiter = rateLimit({
   },
 });
 
+// POST /api/users/:id/block  (auth required)
+usersRouter.post('/:id/block', authMiddleware, async (req, res, next) => {
+  try {
+    const blockedId = req.params.id;
+    if (blockedId === req.user.id) {
+      return res.status(400).json({ error: 'Kendinizi engelleyemezsiniz.' });
+    }
+
+    const { rows } = await query('SELECT id FROM users WHERE id=$1', [blockedId]);
+    if (!rows.length) {
+      return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
+    }
+
+    await query(`
+      INSERT INTO user_blocks (blocker_id, blocked_id)
+      VALUES ($1, $2)
+      ON CONFLICT (blocker_id, blocked_id) DO NOTHING
+    `, [req.user.id, blockedId]);
+
+    try {
+      await mailer.sendMail({
+        from: process.env.SMTP_USER,
+        to: process.env.REPORT_TO_EMAIL || 'ilbey.gungor@outlook.com',
+        subject: 'Tarım Pazar Kullanıcı Engelleme Bildirimi',
+        text: `
+Engelleyen kullanıcı ID: ${req.user.id}
+Engellenen kullanıcı ID: ${blockedId}
+Tarih: ${new Date().toISOString()}
+Sebep: Diğer
+Açıklama: Kullanıcı engelleme aksiyonu
+        `,
+      });
+    } catch (mailErr) {
+      console.error('User block notification mail error:', mailErr);
+    }
+
+    res.json({ ok: true, blocked_user_id: blockedId });
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/users/:id/block  (auth required)
+usersRouter.delete('/:id/block', authMiddleware, async (req, res, next) => {
+  try {
+    await query(
+      'DELETE FROM user_blocks WHERE blocker_id=$1 AND blocked_id=$2',
+      [req.user.id, req.params.id]
+    );
+    res.json({ ok: true, blocked_user_id: req.params.id });
+  } catch (err) { next(err); }
+});
+
 // POST /api/users/:id/reports  (public)
 usersRouter.post('/:id/reports', userReportLimiter, async (req, res, next) => {
   try {
@@ -353,13 +404,20 @@ ${reportedUser?.profile_image || '-'}
 });
 
 // GET /api/users/:id  (public profile)
-usersRouter.get('/:id', async (req, res, next) => {
+usersRouter.get('/:id', authMiddleware.optional, async (req, res, next) => {
   try {
     const { rows } = await query(`
       SELECT id,name,phone_verified,city,district,bio,tc_verified,cks_verified,
-             is_verified,rating,total_trades,profile_image,created_at
+             is_verified,rating,total_trades,profile_image,created_at,
+             CASE
+               WHEN $2::uuid IS NULL THEN false
+               ELSE EXISTS (
+                 SELECT 1 FROM user_blocks ub
+                 WHERE ub.blocker_id = $2 AND ub.blocked_id = users.id
+               )
+             END AS is_blocked
       FROM users WHERE id=$1
-    `, [req.params.id]);
+    `, [req.params.id, req.user?.id || null]);
     if (!rows.length) return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
     res.json(rows[0]);
   } catch (err) { next(err); }

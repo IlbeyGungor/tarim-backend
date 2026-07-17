@@ -243,6 +243,16 @@ console.log('DB INFO:', dbInfo.rows[0]);
       )
     `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS user_blocks (
+        blocker_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        blocked_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at  TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (blocker_id, blocked_id),
+        CHECK (blocker_id <> blocked_id)
+      )
+    `);
+
     // ── Indexes ────────────────────────────────────────────────
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_seller     ON listings(seller_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_city       ON listings(city)`);
@@ -259,6 +269,7 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_reviews_reviewee    ON reviews(reviewee_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_reviews_offer       ON reviews(offer_id)`);
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_unique_pair ON reviews(reviewer_id, reviewee_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_user_blocks_blocked ON user_blocks(blocked_id)`);
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_phone_verification_attempts_user_created
       ON phone_verification_attempts(user_id, created_at DESC)

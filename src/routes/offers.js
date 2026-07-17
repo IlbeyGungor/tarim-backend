@@ -150,6 +150,16 @@ router.get('/chats', authMiddleware, async (req, res, next) => {
       ) last_message ON true
       WHERE o.status = 'accepted'
         AND ${chatAccessWhere('o')}
+        AND NOT EXISTS (
+          SELECT 1 FROM user_blocks ub
+          WHERE (
+            ub.blocker_id = $1
+            AND ub.blocked_id = CASE WHEN o.buyer_id = $1 THEN l.seller_id ELSE o.buyer_id END
+          ) OR (
+            ub.blocked_id = $1
+            AND ub.blocker_id = CASE WHEN o.buyer_id = $1 THEN l.seller_id ELSE o.buyer_id END
+          )
+        )
       ORDER BY COALESCE(last_message.created_at, o.updated_at, o.created_at) DESC
     `, [req.user.id]);
     res.json(rows);
@@ -272,6 +282,11 @@ router.get('/my', authMiddleware, async (req, res, next) => {
       WHERE o.buyer_id = $1
         AND o.buyer_deleted_at IS NULL
         AND (l.status <> 'reserved' OR o.status IN ('accepted','rejected'))
+        AND NOT EXISTS (
+          SELECT 1 FROM user_blocks ub
+          WHERE (ub.blocker_id = $1 AND ub.blocked_id = l.seller_id)
+             OR (ub.blocked_id = $1 AND ub.blocker_id = l.seller_id)
+        )
       ORDER BY o.created_at DESC
     `, [req.user.id]);
     res.json(rows);
@@ -289,6 +304,11 @@ router.get('/received', authMiddleware, async (req, res, next) => {
       JOIN listings l ON l.id = o.listing_id
       JOIN users u ON u.id = o.buyer_id
       WHERE l.seller_id = $1 AND o.seller_deleted_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM user_blocks ub
+          WHERE (ub.blocker_id = $1 AND ub.blocked_id = o.buyer_id)
+             OR (ub.blocked_id = $1 AND ub.blocker_id = o.buyer_id)
+        )
       ORDER BY o.created_at DESC
     `, [req.user.id]);
     res.json(rows);
@@ -320,6 +340,17 @@ router.post('/', authMiddleware, [
     if (listing.seller_id === req.user.id) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Kendi ilanınıza teklif veremezsiniz.' });
+    }
+
+    const { rows: blockRows } = await client.query(`
+      SELECT 1 FROM user_blocks
+      WHERE (blocker_id=$1 AND blocked_id=$2)
+         OR (blocker_id=$2 AND blocked_id=$1)
+      LIMIT 1
+    `, [req.user.id, listing.seller_id]);
+    if (blockRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Bu kullanıcıyla etkileşim kuramazsınız.' });
     }
 
     const { rows } = await client.query(`
@@ -810,7 +841,17 @@ async function requireAcceptedChatParticipant(offerId, userId) {
     JOIN users buyer ON buyer.id = o.buyer_id
     JOIN users seller ON seller.id = l.seller_id
     WHERE o.id=$1 AND o.status='accepted'
-  `, [offerId]);
+      AND NOT EXISTS (
+        SELECT 1 FROM user_blocks ub
+        WHERE (
+          ub.blocker_id = $2
+          AND ub.blocked_id = CASE WHEN o.buyer_id = $2 THEN l.seller_id ELSE o.buyer_id END
+        ) OR (
+          ub.blocked_id = $2
+          AND ub.blocker_id = CASE WHEN o.buyer_id = $2 THEN l.seller_id ELSE o.buyer_id END
+        )
+      )
+  `, [offerId, userId]);
   if (!rows.length) return null;
   const offer = rows[0];
   if (offer.buyer_id !== userId && offer.seller_id !== userId) return null;
@@ -826,7 +867,17 @@ async function requireOfferParticipant(offerId, userId) {
     JOIN users buyer ON buyer.id = o.buyer_id
     JOIN users seller ON seller.id = l.seller_id
     WHERE o.id=$1
-  `, [offerId]);
+      AND NOT EXISTS (
+        SELECT 1 FROM user_blocks ub
+        WHERE (
+          ub.blocker_id = $2
+          AND ub.blocked_id = CASE WHEN o.buyer_id = $2 THEN l.seller_id ELSE o.buyer_id END
+        ) OR (
+          ub.blocked_id = $2
+          AND ub.blocker_id = CASE WHEN o.buyer_id = $2 THEN l.seller_id ELSE o.buyer_id END
+        )
+      )
+  `, [offerId, userId]);
   if (!rows.length) return null;
   const offer = rows[0];
   if (offer.buyer_id !== userId && offer.seller_id !== userId) return null;
