@@ -7,6 +7,7 @@ const { fetchAntalyaRows } = require("./scrapers/antalya");
 const { fetchCanakkaleRows } = require("./scrapers/canakkale");
 const { fetchKocaeliRows } = require("./scrapers/kocaeli");
 const { fetchTurkeyRows } = require("./scrapers/turkiye");
+const { updateLatestHistoryCache } = require("./updateLatestHistoryCache");
 
 function getTodayDateForTurkey() {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -109,12 +110,14 @@ async function fetchSourceRows() {
 
 async function run() {
   const client = await getClient();
+  let transactionOpen = false;
 
   try {
     const today = getTodayDateForTurkey();
     const rows = await fetchSourceRows();
 
     await client.query('BEGIN');
+    transactionOpen = true;
 
     for (const row of rows) {
       const productionType = String(row.production_type ?? '').trim() || 'Geleneksel';
@@ -236,11 +239,16 @@ async function run() {
     }
 
     await client.query('COMMIT');
+    transactionOpen = false;
+
+    await updateLatestHistoryCache();
 
     console.log(`market prices updated at ${today}: ${rows.length} rows`);
   } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('Import failed:', err);
+    if (transactionOpen) {
+      await client.query('ROLLBACK');
+    }
+    console.error('Market price update failed:', err);
     process.exitCode = 1;
   } finally {
     client.release();
