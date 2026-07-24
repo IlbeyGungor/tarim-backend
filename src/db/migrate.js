@@ -64,6 +64,7 @@ console.log('DB INFO:', dbInfo.rows[0]);
       CREATE TABLE IF NOT EXISTS listings (
         id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
         seller_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        listing_type    VARCHAR(10) NOT NULL CHECK (listing_type IN ('sell','buy')) DEFAULT 'sell',
         crop_name       VARCHAR(120) NOT NULL,
         category        VARCHAR(40)  NOT NULL CHECK (category IN ('grain','vegetable','fruit','nut','legume','other')),
         quantity        NUMERIC(12,2) NOT NULL,
@@ -78,6 +79,7 @@ console.log('DB INFO:', dbInfo.rows[0]);
         harvest_date    DATE,
         view_count      INTEGER DEFAULT 0,
         offer_count     INTEGER DEFAULT 0,
+        fulfilled_quantity NUMERIC(12,2) NOT NULL DEFAULT 0,
         reserved_at     TIMESTAMPTZ,
         reserved_until  TIMESTAMPTZ,
         created_at      TIMESTAMPTZ DEFAULT NOW(),
@@ -98,6 +100,7 @@ console.log('DB INFO:', dbInfo.rows[0]);
         status          VARCHAR(20)  NOT NULL CHECK (status IN ('pending','accepted','rejected','countered','completed')) DEFAULT 'pending',
         counter_price   NUMERIC(10,2),
         counter_by      VARCHAR(20) CHECK (counter_by IN ('seller','buyer')),
+        rejection_source VARCHAR(30) CHECK (rejection_source IN ('manual','listing_fulfilled','listing_closed','superseded')),
         buyer_deleted_at TIMESTAMPTZ,
         seller_deleted_at TIMESTAMPTZ,
         buyer_chat_deleted_at TIMESTAMPTZ,
@@ -110,6 +113,21 @@ console.log('DB INFO:', dbInfo.rows[0]);
     // Existing DBs may already have listings without reservation timestamps.
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS reserved_at TIMESTAMPTZ`);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS reserved_until TIMESTAMPTZ`);
+    await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS listing_type VARCHAR(10) NOT NULL DEFAULT 'sell'`);
+    await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS fulfilled_quantity NUMERIC(12,2) NOT NULL DEFAULT 0`);
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname='listings_listing_type_check'
+            AND conrelid='listings'::regclass
+        ) THEN
+          ALTER TABLE listings ADD CONSTRAINT listings_listing_type_check
+          CHECK (listing_type IN ('sell','buy'));
+        END IF;
+      END $$;
+    `);
     await client.query(`
       UPDATE listings
       SET reserved_at = COALESCE(reserved_at, updated_at, NOW()),
@@ -120,6 +138,28 @@ console.log('DB INFO:', dbInfo.rows[0]);
 
     await client.query(`ALTER TABLE offers ADD COLUMN IF NOT EXISTS buyer_chat_deleted_at TIMESTAMPTZ`);
     await client.query(`ALTER TABLE offers ADD COLUMN IF NOT EXISTS seller_chat_deleted_at TIMESTAMPTZ`);
+    await client.query(`ALTER TABLE offers ADD COLUMN IF NOT EXISTS rejection_source VARCHAR(30)`);
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname='offers_rejection_source_check'
+            AND conrelid='offers'::regclass
+        ) THEN
+          ALTER TABLE offers ADD CONSTRAINT offers_rejection_source_check
+          CHECK (rejection_source IN ('manual','listing_fulfilled','listing_closed','superseded'));
+        END IF;
+      END $$;
+    `);
+    await client.query(`
+      UPDATE listings l
+      SET fulfilled_quantity = COALESCE((
+        SELECT SUM(o.quantity)
+        FROM offers o
+        WHERE o.listing_id=l.id AND o.status IN ('accepted','completed')
+      ), 0)
+    `);
 
     // ── messages ───────────────────────────────────────────────
     await client.query(`
@@ -259,12 +299,21 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_category   ON listings(category)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_status     ON listings(status)`);
     await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_listings_active_type_created
+      ON listings(listing_type, created_at DESC)
+      WHERE status = 'active'
+    `);
+    await client.query(`
       CREATE INDEX IF NOT EXISTS idx_listings_reserved_until
       ON listings(reserved_until)
       WHERE status = 'reserved'
     `);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_offers_listing      ON offers(listing_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_offers_buyer        ON offers(buyer_id)`);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_offers_listing_buyer_status
+      ON offers(listing_id, buyer_id, status)
+    `);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_offer      ON messages(offer_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_reviews_reviewee    ON reviews(reviewee_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_reviews_offer       ON reviews(offer_id)`);

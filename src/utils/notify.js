@@ -89,40 +89,48 @@ async function sendToUser(userId, { title, body, data = {} }) {
 }
 
 const notify = {
-  async newOffer({ sellerId, buyerName, cropName, offeredPrice, unit, offerId, listingId }) {
-    await sendToUser(sellerId, {
+  async newOffer({ ownerId, sellerId, proposerName, buyerName, cropName, offeredPrice, unit, offerId, listingId, listingType = 'sell' }) {
+    const role = listingType === 'buy' ? 'satıcı' : 'alıcı';
+    await sendToUser(ownerId || sellerId, {
       title: '🌾 Yeni Teklif Aldınız',
-      body: `${buyerName}, "${cropName}" ilanınıza ₺${parseFloat(offeredPrice).toFixed(2)}/${unit} teklif etti.`,
+      body: `${proposerName || buyerName || `Bir ${role}`}, "${cropName}" ilanınıza ₺${parseFloat(offeredPrice).toFixed(2)}/${unit} teklif etti.`,
       data: { type: 'new_offer', offer_id: String(offerId), listing_id: String(listingId) },
     });
   },
 
-  async offerAccepted({ buyerId, sellerName, cropName, offerId, listingId }) {
-    await sendToUser(buyerId, {
-      title: '✅ Teklifiniz Kabul Edildi!',
-      body: `${sellerName}, "${cropName}" için teklifinizi kabul etti. İletişime geçebilirsiniz.`,
+  async offerAccepted({ recipientId, buyerId, actorName, sellerName, cropName, offerId, listingId, acceptedCounter = false }) {
+    await sendToUser(recipientId || buyerId, {
+      title: acceptedCounter
+        ? '✅ Karşı Teklifiniz Kabul Edildi!'
+        : '✅ Teklifiniz Kabul Edildi!',
+      body: acceptedCounter
+        ? `${actorName || sellerName}, "${cropName}" için karşı teklifinizi kabul etti. İletişime geçebilirsiniz.`
+        : `${actorName || sellerName}, "${cropName}" için teklifinizi kabul etti. İletişime geçebilirsiniz.`,
       data: { type: 'offer_accepted', offer_id: String(offerId), listing_id: String(listingId) },
     });
   },
 
-  async offerRejected({ buyerId, cropName, offerId, listingId }) {
-    await sendToUser(buyerId, {
+  async offerRejected({ recipientId, buyerId, cropName, offerId, listingId }) {
+    await sendToUser(recipientId || buyerId, {
       title: '❌ Teklifiniz Reddedildi',
       body: `"${cropName}" için verdiğiniz teklif reddedildi. Yeni bir teklif verebilirsiniz.`,
       data: { type: 'offer_rejected', offer_id: String(offerId), listing_id: String(listingId) },
     });
   },
 
-  async offerRejectedByAcceptedOther({ buyerId, sellerName, cropName, offerId, listingId }) {
-    await sendToUser(buyerId, {
+  async offerAutoRejected({ recipientId, ownerName, cropName, offerId, listingId, reason }) {
+    const body = reason === 'listing_closed'
+      ? `${ownerName}, "${cropName}" ilanını kapattı. Açık teklifiniz otomatik olarak reddedildi.`
+      : `${ownerName}, "${cropName}" ilanındaki hedef miktarı tamamladı. Açık teklifiniz otomatik olarak reddedildi.`;
+    await sendToUser(recipientId, {
       title: '❌ Teklifiniz Reddedildi',
-      body: `${sellerName}, "${cropName}" ilanında başka bir teklifi kabul etti. Teklifiniz otomatik olarak reddedildi.`,
+      body,
       data: { type: 'offer_rejected_other_accepted', offer_id: String(offerId), listing_id: String(listingId) },
     });
   },
 
-  async counterOffer({ recipientId, senderName, cropName, counterPrice, unit, offerId, madeBy, listingId }) {
-    const who = madeBy === 'seller' ? 'Satıcı' : 'Alıcı';
+  async counterOffer({ recipientId, senderName, cropName, counterPrice, unit, offerId, madeBy, actorRole, listingId }) {
+    const who = actorRole || (madeBy === 'seller' ? 'İlan sahibi' : 'Teklif veren');
     await sendToUser(recipientId, {
       title: '🔄 Karşı Teklif Geldi',
       body: `${who} ${senderName}, "${cropName}" için ₺${parseFloat(counterPrice).toFixed(2)}/${unit} karşı teklif yaptı.`,
@@ -130,10 +138,10 @@ const notify = {
     });
   },
 
-  async finalOffer({ sellerId, buyerName, cropName, finalPrice, unit, offerId, listingId }) {
-    await sendToUser(sellerId, {
+  async finalOffer({ recipientId, sellerId, proposerName, buyerName, cropName, finalPrice, unit, offerId, listingId }) {
+    await sendToUser(recipientId || sellerId, {
       title: '⚡ Son Teklif Geldi',
-      body: `${buyerName}, "${cropName}" için son teklifini yaptı: ₺${parseFloat(finalPrice).toFixed(2)}/${unit}`,
+      body: `${proposerName || buyerName}, "${cropName}" için son teklifini yaptı: ₺${parseFloat(finalPrice).toFixed(2)}/${unit}`,
       data: { type: 'final_offer', offer_id: String(offerId), listing_id: String(listingId) },
     });
   },
@@ -156,10 +164,12 @@ const notify = {
     });
   },
 
-  async reviewReceived({ revieweeId, reviewerName, rating, offerId }) {
+  async reviewReceived({ revieweeId, reviewerName, rating, offerId, hasMessage = false }) {
     await sendToUser(revieweeId, {
       title: '⭐ Yeni Değerlendirme Aldınız',
-      body: `${reviewerName}, size ${rating}/5 puan verdi ve değerlendirme yazdı.`,
+      body: hasMessage
+        ? `${reviewerName}, size ${rating}/5 puan verdi ve değerlendirme yazdı.`
+        : `${reviewerName}, size ${rating}/5 puan verdi.`,
       data: { type: 'review_received', offer_id: String(offerId) },
     });
   },

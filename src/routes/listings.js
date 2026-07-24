@@ -1,14 +1,22 @@
 const router = require('express').Router();
 const { body, query: qv, validationResult } = require('express-validator');
-const { query } = require('../db');
+const { query, getClient } = require('../db');
 const authMiddleware = require('../middleware/auth');
 const { rateLimit } = require('express-rate-limit');
 const mailer = require('../services/mailer');
+const notify = require('../utils/notify');
+
+function sendNotification(type, promise) {
+  promise.catch((err) => {
+    console.error(`[notification] ${type} failed:`, err);
+  });
+}
 
 // Reusable query to get full listing with seller info
 const LISTING_SELECT = `
   SELECT
     l.*,
+    GREATEST(l.quantity - l.fulfilled_quantity, 0) AS remaining_quantity,
     json_build_object(
       'id', u.id, 'name', u.name, 'phone', u.phone,
       'phone_verified', u.phone_verified, 'city', u.city, 'district', u.district,
@@ -34,7 +42,7 @@ const reportLimiter = rateLimit({
 // GET /api/listings  (public, with optional filters)
 router.get('/', authMiddleware.optional, async (req, res, next) => {
   try {
-    const { search, category, city, status, page = 1, limit = 20 } = req.query;
+    const { search, category, city, listing_type, status, page = 1, limit = 20 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const params = [];
     const conditions = ["l.status = 'active'"];
@@ -54,6 +62,13 @@ router.get('/', authMiddleware.optional, async (req, res, next) => {
     }
     if (category) { params.push(category); conditions.push(`l.category = $${params.length}`); }
     if (city)     { params.push(city);     conditions.push(`l.city = $${params.length}`); }
+    if (listing_type) {
+      if (!['sell', 'buy'].includes(listing_type)) {
+        return res.status(400).json({ error: 'Geçersiz ilan tipi.' });
+      }
+      params.push(listing_type);
+      conditions.push(`l.listing_type = $${params.length}`);
+    }
     if (req.user) {
       params.push(req.user.id);
       conditions.push(`NOT EXISTS (
@@ -155,7 +170,8 @@ Açıklama: ${description || '-'}
 Fiyat: ${listing?.price || listing?.price_per_unit || '-'}
 Miktar: ${listing?.quantity || '-'}
 Konum: ${listing?.location_display || [listing?.city, listing?.district].filter(Boolean).join(' / ') || '-'}
-Satıcı: ${listing?.seller_name || listing?.seller?.name || '-'} (${listing?.seller_id || listing?.seller?.id || '-'})
+İlan tipi: ${listing?.listing_type === 'buy' ? 'Aranıyor' : 'Satılık'}
+İlan sahibi: ${listing?.seller_name || listing?.seller?.name || '-'} (${listing?.seller_id || listing?.seller?.id || '-'})
 
 Bildiren: ${reporter?.name || 'Misafir'} (${reporter?.id || '-'})
 Telefon: ${reporter?.phone || '-'}
@@ -174,6 +190,7 @@ ${(listing?.image_urls || []).join('\n') || '-'}
 
 // POST /api/listings  (auth required)
 router.post('/', authMiddleware, [
+  body('listing_type').optional().isIn(['sell','buy']),
   body('crop_name').trim().notEmpty().withMessage('Ürün adı zorunludur.'),
   body('category').isIn(['grain','vegetable','fruit','nut','legume','other']),
   body('quantity').isFloat({ gt: 0 }),
@@ -184,21 +201,82 @@ router.post('/', authMiddleware, [
 
   try {
     const {
-      crop_name, category, quantity, unit = 'kg',
+      listing_type = 'sell', crop_name, category, quantity, unit = 'kg',
       price_per_unit, price_type = 'negotiate',
       city, district, address, description, harvest_date
     } = req.body;
 
     const { rows } = await query(`
       INSERT INTO listings
-        (seller_id,crop_name,category,quantity,unit,price_per_unit,price_type,city,district,address,description,harvest_date)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        (seller_id,listing_type,crop_name,category,quantity,unit,price_per_unit,price_type,city,district,address,description,harvest_date)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
       RETURNING *
-    `, [req.user.id, crop_name, category, quantity, unit, price_per_unit, price_type,
+    `, [req.user.id, listing_type, crop_name, category, quantity, unit, price_per_unit, price_type,
         city||null, district||null, address||null, description||null, harvest_date||null]);
 
     res.status(201).json(rows[0]);
   } catch (err) { next(err); }
+});
+
+// POST /api/listings/:id/close  (auth, owner only)
+router.post('/:id/close', authMiddleware, async (req, res, next) => {
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    const { rows: listingRows } = await client.query(`
+      SELECT l.*, u.name AS owner_name
+      FROM listings l
+      JOIN users u ON u.id=l.seller_id
+      WHERE l.id=$1
+      FOR UPDATE OF l
+    `, [req.params.id]);
+    if (!listingRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'İlan bulunamadı.' });
+    }
+    const listing = listingRows[0];
+    if (listing.seller_id !== req.user.id) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Yetki yok.' });
+    }
+    if (listing.status !== 'active') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Yalnızca aktif ilan kapatılabilir.' });
+    }
+
+    const { rows: rejectedOffers } = await client.query(`
+      UPDATE offers
+      SET status='rejected', rejection_source='listing_closed',
+          counter_price=NULL, counter_by=NULL, updated_at=NOW()
+      WHERE listing_id=$1 AND status IN ('pending','countered')
+      RETURNING id, buyer_id
+    `, [req.params.id]);
+    const { rows } = await client.query(`
+      UPDATE listings
+      SET status='reserved', reserved_at=NOW(),
+          reserved_until=NOW() + INTERVAL '7 days', updated_at=NOW()
+      WHERE id=$1
+      RETURNING *, GREATEST(quantity - fulfilled_quantity, 0) AS remaining_quantity
+    `, [req.params.id]);
+    await client.query('COMMIT');
+
+    rejectedOffers.forEach((offer) => {
+      sendNotification('offerAutoRejected', notify.offerAutoRejected({
+        recipientId: offer.buyer_id,
+        ownerName: listing.owner_name,
+        cropName: listing.crop_name,
+        offerId: offer.id,
+        listingId: listing.id,
+        reason: 'listing_closed',
+      }));
+    });
+    res.json(rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
 });
 
 // PATCH /api/listings/:id  (auth, owner only)
@@ -207,8 +285,22 @@ router.patch('/:id', authMiddleware, async (req, res, next) => {
     const { rows: existing } = await query('SELECT * FROM listings WHERE id=$1', [req.params.id]);
     if (!existing.length) return res.status(404).json({ error: 'İlan bulunamadı.' });
     if (existing[0].seller_id !== req.user.id) return res.status(403).json({ error: 'Yetki yok.' });
+    if (req.body.quantity !== undefined) {
+      const quantity = Number(req.body.quantity);
+      if (!Number.isFinite(quantity) || quantity <= Number(existing[0].fulfilled_quantity)) {
+        return res.status(400).json({
+          error: 'Hedef miktar kabul edilmiş miktardan büyük olmalıdır.',
+        });
+      }
+    }
+    if (
+      req.body.price_per_unit !== undefined &&
+      !(Number(req.body.price_per_unit) > 0)
+    ) {
+      return res.status(400).json({ error: 'Birim fiyat sıfırdan büyük olmalıdır.' });
+    }
 
-    const allowed = ['crop_name','quantity','price_per_unit','price_type','description','status','harvest_date'];
+    const allowed = ['crop_name','quantity','price_per_unit','price_type','description','harvest_date'];
     const sets = [], params = [];
     for (const key of allowed) {
       if (req.body[key] !== undefined) {

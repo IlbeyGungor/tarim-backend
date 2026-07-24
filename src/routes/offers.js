@@ -102,6 +102,79 @@ async function upsertLatestOfferTimelineMessage(client, {
   });
 }
 
+async function acceptOffer(client, offer) {
+  const { rows: acceptedSiblingRows } = await client.query(`
+    SELECT id FROM offers
+    WHERE listing_id=$1 AND buyer_id=$2 AND id<>$3 AND status='accepted'
+    LIMIT 1
+  `, [offer.listing_id, offer.buyer_id, offer.id]);
+  if (acceptedSiblingRows.length) {
+    const error = new Error('Bu kullanıcı için daha önce bir teklif kabul edilmiş.');
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const { rows: acceptedRows } = await client.query(`
+    UPDATE offers
+    SET status='accepted', counter_price=NULL, counter_by=NULL,
+        rejection_source=NULL, updated_at=NOW()
+    WHERE id=$1 AND status IN ('pending','countered')
+    RETURNING *
+  `, [offer.id]);
+  if (!acceptedRows.length) {
+    const error = new Error('Bu teklif artık kabul edilmeye uygun değil.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  await client.query(`
+    UPDATE offers
+    SET status='rejected', rejection_source='superseded',
+        counter_price=NULL, counter_by=NULL, updated_at=NOW()
+    WHERE listing_id=$1 AND buyer_id=$2 AND id<>$3
+      AND status IN ('pending','countered')
+  `, [offer.listing_id, offer.buyer_id, offer.id]);
+
+  const { rows: listingRows } = await client.query(`
+    UPDATE listings
+    SET fulfilled_quantity=fulfilled_quantity + $2, updated_at=NOW()
+    WHERE id=$1 AND status='active'
+    RETURNING *, GREATEST(quantity - fulfilled_quantity, 0) AS remaining_quantity
+  `, [offer.listing_id, offer.quantity]);
+  if (!listingRows.length) {
+    const error = new Error('Bu ilan artık teklif kabul etmeye uygun değil.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const listing = listingRows[0];
+  let autoRejectedOffers = [];
+  const isFulfilled = Number(listing.fulfilled_quantity) >= Number(listing.quantity);
+  if (isFulfilled) {
+    await client.query(`
+      UPDATE listings
+      SET status='reserved', reserved_at=NOW(),
+          reserved_until=NOW() + INTERVAL '7 days', updated_at=NOW()
+      WHERE id=$1
+    `, [offer.listing_id]);
+    const { rows } = await client.query(`
+      UPDATE offers
+      SET status='rejected', rejection_source='listing_fulfilled',
+          counter_price=NULL, counter_by=NULL, updated_at=NOW()
+      WHERE listing_id=$1 AND status IN ('pending','countered')
+      RETURNING id, buyer_id
+    `, [offer.listing_id]);
+    autoRejectedOffers = rows;
+  }
+
+  return {
+    offer: acceptedRows[0],
+    listing,
+    isFulfilled,
+    autoRejectedOffers,
+  };
+}
+
 // GET /api/offers/chats — accepted offer chats for current user
 router.get('/chats', authMiddleware, async (req, res, next) => {
   try {
@@ -119,6 +192,10 @@ router.get('/chats', authMiddleware, async (req, res, next) => {
           'district', l.district,
           'unit', l.unit,
           'price_per_unit', l.price_per_unit,
+          'listing_type', l.listing_type,
+          'quantity', l.quantity,
+          'fulfilled_quantity', l.fulfilled_quantity,
+          'remaining_quantity', GREATEST(l.quantity - l.fulfilled_quantity, 0),
           'status', l.status
         ) AS listing,
         CASE
@@ -173,7 +250,7 @@ router.delete('/:id/chat', authMiddleware, async (req, res, next) => {
       SELECT o.id, o.buyer_id, l.seller_id
       FROM offers o
       JOIN listings l ON l.id = o.listing_id
-      WHERE o.id=$1 AND o.status='accepted'
+      WHERE o.id=$1 AND o.status IN ('accepted','completed')
     `, [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'Sohbet bulunamadı.' });
 
@@ -211,11 +288,15 @@ router.post('/:id/reviews', authMiddleware, [
       JOIN listings l ON l.id = o.listing_id
       JOIN users buyer ON buyer.id = o.buyer_id
       JOIN users seller ON seller.id = l.seller_id
-      WHERE o.id=$1 AND o.status='accepted'
+      WHERE o.id=$1
+        AND (
+          o.status IN ('accepted','completed')
+          OR (o.status='rejected' AND o.rejection_source='manual')
+        )
     `, [req.params.id]);
     if (!offerRows.length) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Kabul edilmiş teklif bulunamadı.' });
+      return res.status(404).json({ error: 'Değerlendirmeye uygun teklif bulunamadı.' });
     }
 
     const offer = offerRows[0];
@@ -259,6 +340,7 @@ router.post('/:id/reviews', authMiddleware, [
       reviewerName,
       rating,
       offerId: req.params.id,
+      hasMessage: Boolean(String(message || '').trim()),
     }));
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -274,7 +356,10 @@ router.get('/my', authMiddleware, async (req, res, next) => {
     const { rows } = await query(`
       SELECT o.*,
         json_build_object('id',l.id,'crop_name',l.crop_name,'city',l.city,
-          'district',l.district,'unit',l.unit,'price_per_unit',l.price_per_unit) AS listing,
+          'district',l.district,'unit',l.unit,'price_per_unit',l.price_per_unit,
+          'listing_type',l.listing_type,'quantity',l.quantity,
+          'fulfilled_quantity',l.fulfilled_quantity,
+          'remaining_quantity',GREATEST(l.quantity-l.fulfilled_quantity,0)) AS listing,
         json_build_object('id',u.id,'name',u.name,'phone',u.phone,'phone_verified',u.phone_verified) AS seller
       FROM offers o
       JOIN listings l ON l.id = o.listing_id
@@ -298,7 +383,10 @@ router.get('/received', authMiddleware, async (req, res, next) => {
   try {
     const { rows } = await query(`
       SELECT o.*,
-        json_build_object('id',l.id,'crop_name',l.crop_name,'city',l.city,'district',l.district,'unit',l.unit,'price_per_unit',l.price_per_unit) AS listing,
+        json_build_object('id',l.id,'crop_name',l.crop_name,'city',l.city,'district',l.district,'unit',l.unit,'price_per_unit',l.price_per_unit,
+          'listing_type',l.listing_type,'quantity',l.quantity,
+          'fulfilled_quantity',l.fulfilled_quantity,
+          'remaining_quantity',GREATEST(l.quantity-l.fulfilled_quantity,0)) AS listing,
         json_build_object('id',u.id,'name',u.name,'phone',u.phone,'phone_verified',u.phone_verified,'rating',u.rating,'is_verified',u.is_verified) AS buyer
       FROM offers o
       JOIN listings l ON l.id = o.listing_id
@@ -329,7 +417,7 @@ router.post('/', authMiddleware, [
     const { listing_id, offered_price, quantity, message } = req.body;
 
     const { rows: listingRows } = await client.query(
-      "SELECT l.*, u.name AS seller_name FROM listings l JOIN users u ON u.id=l.seller_id WHERE l.id=$1 AND l.status='active'",
+      "SELECT l.*, u.name AS seller_name FROM listings l JOIN users u ON u.id=l.seller_id WHERE l.id=$1 AND l.status='active' FOR UPDATE OF l",
       [listing_id]
     );
     if (!listingRows.length) {
@@ -351,6 +439,25 @@ router.post('/', authMiddleware, [
     if (blockRows.length) {
       await client.query('ROLLBACK');
       return res.status(403).json({ error: 'Bu kullanıcıyla etkileşim kuramazsınız.' });
+    }
+
+    await client.query(
+      'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
+      [String(listing_id), String(req.user.id)]
+    );
+    const { rows: openOfferRows } = await client.query(`
+      SELECT id FROM offers
+      WHERE listing_id=$1 AND buyer_id=$2
+        AND status IN ('pending','countered','accepted')
+      ORDER BY created_at DESC
+      LIMIT 1
+    `, [listing_id, req.user.id]);
+    if (openOfferRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'Bu ilan için zaten açık bir teklifiniz var.',
+        existing_offer_id: openOfferRows[0].id,
+      });
     }
 
     const { rows } = await client.query(`
@@ -375,16 +482,38 @@ router.post('/', authMiddleware, [
     await client.query('COMMIT');
 
     sendNotification('newOffer', notify.newOffer({
-      sellerId:      listing.seller_id,
-      buyerName:     buyerRows[0]?.name || 'Bir alıcı',
+      ownerId:       listing.seller_id,
+      proposerName:  buyerRows[0]?.name || (listing.listing_type === 'buy' ? 'Bir satıcı' : 'Bir alıcı'),
       cropName:      listing.crop_name,
       offeredPrice:  offered_price,
       unit:          listing.unit,
       offerId:       rows[0].id,
       listingId:     listing_id,
+      listingType:   listing.listing_type,
     }));
 
-    res.status(201).json(rows[0]);
+    res.status(201).json({
+      ...rows[0],
+      listing: {
+        id: listing.id,
+        crop_name: listing.crop_name,
+        city: listing.city,
+        district: listing.district,
+        unit: listing.unit,
+        price_per_unit: listing.price_per_unit,
+        listing_type: listing.listing_type,
+        quantity: listing.quantity,
+        fulfilled_quantity: listing.fulfilled_quantity,
+        remaining_quantity: Math.max(
+          Number(listing.quantity) - Number(listing.fulfilled_quantity),
+          0
+        ),
+      },
+      seller: {
+        id: listing.seller_id,
+        name: listing.seller_name,
+      },
+    });
   } catch (err) { await client.query('ROLLBACK'); next(err); } finally { client.release(); }
 });
 
@@ -398,10 +527,11 @@ router.patch('/:id/respond', authMiddleware, [
   try {
     await client.query('BEGIN');
     const { status, counter_price, message } = req.body;
-    let autoRejectedOffers = [];
+    let acceptance = null;
 
     const { rows: offerRows } = await client.query(`
-      SELECT o.*, l.seller_id, l.crop_name, l.unit, l.status AS listing_status,
+      SELECT o.*, l.seller_id, l.crop_name, l.unit, l.listing_type,
+             l.status AS listing_status,
              buyer.name AS buyer_name, seller.name AS seller_name
       FROM offers o
       JOIN listings l ON l.id=o.listing_id
@@ -424,11 +554,37 @@ router.patch('/:id/respond', authMiddleware, [
       return res.status(400).json({ error: 'Bu ilan artık teklif kabul etmeye uygun değil.' });
     }
 
-    const counterBy = status === 'countered' ? 'seller' : null;
-    const { rows } = await client.query(`
-      UPDATE offers SET status=$1, counter_price=$2, counter_by=$3, updated_at=NOW()
-      WHERE id=$4 RETURNING *
-    `, [status, status === 'countered' ? counter_price : null, counterBy, req.params.id]);
+    if (
+      !['pending', 'countered'].includes(offer.status) ||
+      (offer.status === 'countered' && offer.counter_by !== 'buyer')
+    ) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Bu teklif artık yanıtlanmaya uygun değil.' });
+    }
+    if (status === 'countered' && !(Number(counter_price) > 0)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Geçerli bir karşı teklif fiyatı girin.' });
+    }
+
+    let rows;
+    if (status === 'accepted') {
+      acceptance = await acceptOffer(client, offer);
+      rows = [acceptance.offer];
+    } else {
+      const counterBy = status === 'countered' ? 'seller' : null;
+      ({ rows } = await client.query(`
+        UPDATE offers
+        SET status=$1, counter_price=$2, counter_by=$3,
+            rejection_source=$4, updated_at=NOW()
+        WHERE id=$5 RETURNING *
+      `, [
+        status,
+        status === 'countered' ? counter_price : null,
+        counterBy,
+        status === 'rejected' ? 'manual' : null,
+        req.params.id,
+      ]));
+    }
 
     if (status === 'countered') {
       await insertOfferTimelineMessage(client, {
@@ -442,48 +598,29 @@ router.patch('/:id/respond', authMiddleware, [
       });
     }
 
-    if (status === 'accepted') {
-      await client.query(`
-        UPDATE listings
-        SET status='reserved',
-            reserved_at=NOW(),
-            reserved_until=NOW() + INTERVAL '7 days',
-            updated_at=NOW()
-        WHERE id=$1
-      `, [offer.listing_id]);
-      const { rows: rejectedRows } = await client.query(`
-        UPDATE offers
-        SET status='rejected', updated_at=NOW()
-        WHERE listing_id=$1
-          AND id<>$2
-          AND status IN ('pending','countered')
-        RETURNING id, buyer_id
-      `, [offer.listing_id, req.params.id]);
-      autoRejectedOffers = rejectedRows;
-    }
-
     await client.query('COMMIT');
 
     if (status === 'accepted') {
       sendNotification('offerAccepted', notify.offerAccepted({
-        buyerId: offer.buyer_id,
-        sellerName: offer.seller_name,
+        recipientId: offer.buyer_id,
+        actorName: offer.seller_name,
         cropName: offer.crop_name,
         offerId: req.params.id,
         listingId: offer.listing_id,
       }));
-      autoRejectedOffers.forEach((rejectedOffer) => {
-        sendNotification('offerRejectedByAcceptedOther', notify.offerRejectedByAcceptedOther({
-          buyerId: rejectedOffer.buyer_id,
-          sellerName: offer.seller_name,
+      acceptance.autoRejectedOffers.forEach((rejectedOffer) => {
+        sendNotification('offerAutoRejected', notify.offerAutoRejected({
+          recipientId: rejectedOffer.buyer_id,
+          ownerName: offer.seller_name,
           cropName: offer.crop_name,
           offerId: rejectedOffer.id,
           listingId: offer.listing_id,
+          reason: 'listing_fulfilled',
         }));
       });
     } else if (status === 'rejected') {
       sendNotification('offerRejected', notify.offerRejected({
-        buyerId: offer.buyer_id,
+        recipientId: offer.buyer_id,
         cropName: offer.crop_name,
         offerId: req.params.id,
         listingId: offer.listing_id,
@@ -497,12 +634,22 @@ router.patch('/:id/respond', authMiddleware, [
         unit: offer.unit,
         offerId: req.params.id,
         madeBy: 'seller',
+        actorRole: offer.listing_type === 'buy' ? 'Alıcı' : 'Satıcı',
         listingId: offer.listing_id,
       }));
     }
 
-    res.json(rows[0]);
-  } catch (err) { await client.query('ROLLBACK'); next(err); } finally { client.release(); }
+    res.json(status === 'accepted' ? {
+      ...rows[0],
+      listing_fulfilled: acceptance.isFulfilled,
+      listing_fulfilled_quantity: acceptance.listing.fulfilled_quantity,
+      listing_remaining_quantity: acceptance.listing.remaining_quantity,
+    } : rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  } finally { client.release(); }
 });
 
 // PATCH /api/offers/:id/buyer-respond  — buyer: accept / reject / final counter
@@ -515,10 +662,11 @@ router.patch('/:id/buyer-respond', authMiddleware, [
   try {
     await client.query('BEGIN');
     const { status, counter_price, message } = req.body;
-    let autoRejectedOffers = [];
+    let acceptance = null;
 
     const { rows: offerRows } = await client.query(`
-      SELECT o.*, l.seller_id, l.crop_name, l.unit, l.status AS listing_status,
+      SELECT o.*, l.seller_id, l.crop_name, l.unit, l.listing_type,
+             l.status AS listing_status,
              buyer.name AS buyer_name, seller.name AS seller_name
       FROM offers o
       JOIN listings l ON l.id=o.listing_id
@@ -540,16 +688,38 @@ router.patch('/:id/buyer-respond', authMiddleware, [
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Sadece karşı teklife yanıt verebilirsiniz.' });
     }
+    if (offer.counter_by !== 'seller') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Kendi son teklifinize yanıt veremezsiniz.' });
+    }
     if (status === 'accepted' && offer.listing_status !== 'active') {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Bu ilan artık teklif kabul etmeye uygun değil.' });
     }
+    if (status === 'countered' && !(Number(counter_price) > 0)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Geçerli bir son teklif fiyatı girin.' });
+    }
 
-    const counterBy = status === 'countered' ? 'buyer' : null;
-    const { rows } = await client.query(`
-      UPDATE offers SET status=$1, counter_price=$2, counter_by=$3, updated_at=NOW()
-      WHERE id=$4 RETURNING *
-    `, [status, status === 'countered' ? counter_price : null, counterBy, req.params.id]);
+    let rows;
+    if (status === 'accepted') {
+      acceptance = await acceptOffer(client, offer);
+      rows = [acceptance.offer];
+    } else {
+      const counterBy = status === 'countered' ? 'buyer' : null;
+      ({ rows } = await client.query(`
+        UPDATE offers
+        SET status=$1, counter_price=$2, counter_by=$3,
+            rejection_source=$4, updated_at=NOW()
+        WHERE id=$5 RETURNING *
+      `, [
+        status,
+        status === 'countered' ? counter_price : null,
+        counterBy,
+        status === 'rejected' ? 'manual' : null,
+        req.params.id,
+      ]));
+    }
 
     if (status === 'countered') {
       await insertOfferTimelineMessage(client, {
@@ -563,56 +733,38 @@ router.patch('/:id/buyer-respond', authMiddleware, [
       });
     }
 
-    if (status === 'accepted') {
-      await client.query(`
-        UPDATE listings
-        SET status='reserved',
-            reserved_at=NOW(),
-            reserved_until=NOW() + INTERVAL '7 days',
-            updated_at=NOW()
-        WHERE id=$1
-      `, [offer.listing_id]);
-      const { rows: rejectedRows } = await client.query(`
-        UPDATE offers
-        SET status='rejected', updated_at=NOW()
-        WHERE listing_id=$1
-          AND id<>$2
-          AND status IN ('pending','countered')
-        RETURNING id, buyer_id
-      `, [offer.listing_id, req.params.id]);
-      autoRejectedOffers = rejectedRows;
-    }
-
     await client.query('COMMIT');
 
     if (status === 'accepted') {
       sendNotification('offerAccepted', notify.offerAccepted({
-        buyerId: offer.seller_id,
-        sellerName: offer.buyer_name,
+        recipientId: offer.seller_id,
+        actorName: offer.buyer_name,
         cropName: offer.crop_name,
         offerId: req.params.id,
         listingId: offer.listing_id,
+        acceptedCounter: true,
       }));
-      autoRejectedOffers.forEach((rejectedOffer) => {
-        sendNotification('offerRejectedByAcceptedOther', notify.offerRejectedByAcceptedOther({
-          buyerId: rejectedOffer.buyer_id,
-          sellerName: offer.seller_name,
+      acceptance.autoRejectedOffers.forEach((rejectedOffer) => {
+        sendNotification('offerAutoRejected', notify.offerAutoRejected({
+          recipientId: rejectedOffer.buyer_id,
+          ownerName: offer.seller_name,
           cropName: offer.crop_name,
           offerId: rejectedOffer.id,
           listingId: offer.listing_id,
+          reason: 'listing_fulfilled',
         }));
       });
     } else if (status === 'rejected') {
       sendNotification('offerRejected', notify.offerRejected({
-        buyerId: offer.seller_id,
+        recipientId: offer.seller_id,
         cropName: offer.crop_name,
         offerId: req.params.id,
         listingId: offer.listing_id,
       }));
     } else if (status === 'countered') {
       sendNotification('finalOffer', notify.finalOffer({
-        sellerId: offer.seller_id,
-        buyerName: offer.buyer_name,
+        recipientId: offer.seller_id,
+        proposerName: offer.buyer_name,
         cropName: offer.crop_name,
         finalPrice: counter_price,
         unit: offer.unit,
@@ -621,8 +773,17 @@ router.patch('/:id/buyer-respond', authMiddleware, [
       }));
     }
 
-    res.json(rows[0]);
-  } catch (err) { await client.query('ROLLBACK'); next(err); } finally { client.release(); }
+    res.json(status === 'accepted' ? {
+      ...rows[0],
+      listing_fulfilled: acceptance.isFulfilled,
+      listing_fulfilled_quantity: acceptance.listing.fulfilled_quantity,
+      listing_remaining_quantity: acceptance.listing.remaining_quantity,
+    } : rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  } finally { client.release(); }
 });
 
 // PATCH /api/offers/:id/edit-counter
@@ -709,7 +870,7 @@ router.patch('/:id/cancel-counter', authMiddleware, async (req, res, next) => {
     }
 
     const { rows } = await client.query(
-      "UPDATE offers SET status='pending', counter_price=NULL, counter_by=NULL, updated_at=NOW() WHERE id=$1 RETURNING *",
+      "UPDATE offers SET status='pending', counter_price=NULL, counter_by=NULL, rejection_source=NULL, updated_at=NOW() WHERE id=$1 RETURNING *",
       [req.params.id]
     );
     await client.query('COMMIT');
