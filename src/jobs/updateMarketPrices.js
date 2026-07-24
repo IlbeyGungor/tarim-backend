@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Pool } = require('pg');
+const { getClient, pool } = require('../db');
 const { fetchAdanaRows } = require("./scrapers/adana");
 const { fetchIzmirRows } = require("./scrapers/izmir");
 const { fetchBursaRows } = require("./scrapers/bursa");
@@ -7,10 +7,6 @@ const { fetchAntalyaRows } = require("./scrapers/antalya");
 const { fetchCanakkaleRows } = require("./scrapers/canakkale");
 const { fetchKocaeliRows } = require("./scrapers/kocaeli");
 const { fetchTurkeyRows } = require("./scrapers/turkiye");
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL
-});
 
 function getTodayDateForTurkey() {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -112,7 +108,7 @@ async function fetchSourceRows() {
 }
 
 async function run() {
-  const client = await pool.connect();
+  const client = await getClient();
 
   try {
     const today = getTodayDateForTurkey();
