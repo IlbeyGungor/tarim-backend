@@ -46,9 +46,9 @@ function scheduleMarketPriceUpdate() {
 
   const timezone = process.env.MARKET_PRICE_JOB_TZ || 'Europe/Istanbul';
 
-  // Her gün sabah 07:00
+  // Her gün 11:00
   cron.schedule(
-    '0 7 * * *',
+    '0 11 * * *',
     () => {
       runMarketPriceUpdate();
     },
@@ -57,7 +57,7 @@ function scheduleMarketPriceUpdate() {
     }
   );
 
-  console.log(`🕖 Market price scheduler active: every day at 07:00 (${timezone})`);
+  console.log(`🕚 Market price scheduler active: every day at 11:00 (${timezone})`);
 }
 
 module.exports = {
