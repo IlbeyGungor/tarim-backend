@@ -3,6 +3,7 @@ const pricesRouter = require('express').Router();
 const admin = require('firebase-admin');
 const { query, getClient } = require('../db');
 const authMiddleware = require('../middleware/auth');
+const adminMiddleware = require('../middleware/admin');
 const { rateLimit } = require('express-rate-limit');
 const mailer = require('../services/mailer');
 const multer = require('multer');
@@ -406,9 +407,17 @@ ${reportedUser?.profile_image || '-'}
 // GET /api/users/:id  (public profile)
 usersRouter.get('/:id', authMiddleware.optional, async (req, res, next) => {
   try {
+    const requesterEmail = String(req.user?.email || '').trim().toLowerCase();
+    const canSeeAdminFields = Boolean(
+      req.user?.is_admin &&
+      requesterEmail &&
+      adminMiddleware.configuredAdminEmails().has(requesterEmail)
+    );
     const { rows } = await query(`
       SELECT id,name,phone_verified,city,district,bio,tc_verified,cks_verified,
              is_verified,rating,total_trades,profile_image,created_at,
+             CASE WHEN $3::boolean THEN account_status ELSE NULL END AS account_status,
+             CASE WHEN $3::boolean THEN is_admin ELSE false END AS is_admin,
              CASE
                WHEN $2::uuid IS NULL THEN false
                ELSE EXISTS (
@@ -417,7 +426,7 @@ usersRouter.get('/:id', authMiddleware.optional, async (req, res, next) => {
                )
              END AS is_blocked
       FROM users WHERE id=$1
-    `, [req.params.id, req.user?.id || null]);
+    `, [req.params.id, req.user?.id || null, canSeeAdminFields]);
     if (!rows.length) return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
     res.json(rows[0]);
   } catch (err) { next(err); }

@@ -26,7 +26,13 @@ console.log('DB INFO:', dbInfo.rows[0]);
         phone           VARCHAR(20) UNIQUE,
         phone_verified  BOOLEAN DEFAULT FALSE,
         firebase_uid    VARCHAR(128) UNIQUE,
+        email           VARCHAR(320),
         password_hash   VARCHAR(255) NOT NULL,
+        has_local_password BOOLEAN NOT NULL DEFAULT FALSE,
+        auth_providers  JSONB NOT NULL DEFAULT '[]'::jsonb,
+        is_admin        BOOLEAN NOT NULL DEFAULT FALSE,
+        account_status  VARCHAR(20) NOT NULL DEFAULT 'active',
+        token_version   INTEGER NOT NULL DEFAULT 0,
         city            VARCHAR(80),
         district        VARCHAR(80),
         address         VARCHAR(255),
@@ -44,9 +50,37 @@ console.log('DB INFO:', dbInfo.rows[0]);
 
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_verified BOOLEAN DEFAULT FALSE`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS firebase_uid VARCHAR(128) UNIQUE`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(320)`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS has_local_password BOOLEAN NOT NULL DEFAULT FALSE`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_providers JSONB NOT NULL DEFAULT '[]'::jsonb`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS account_status VARCHAR(20) NOT NULL DEFAULT 'active'`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image TEXT`);
     await client.query(`ALTER TABLE users ALTER COLUMN phone DROP NOT NULL`);
     await client.query(`ALTER TABLE users ALTER COLUMN profile_image TYPE TEXT`);
+    await client.query(`
+      UPDATE users
+      SET has_local_password = true,
+          auth_providers = CASE
+            WHEN auth_providers = '[]'::jsonb THEN '["phone_password"]'::jsonb
+            ELSE auth_providers
+          END
+      WHERE password_hash NOT LIKE 'firebase:%'
+    `);
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname='users_account_status_check'
+            AND conrelid='users'::regclass
+        ) THEN
+          ALTER TABLE users ADD CONSTRAINT users_account_status_check
+          CHECK (account_status IN ('active','suspended','deletion_pending'));
+        END IF;
+      END $$;
+    `);
     await client.query(`
       DO $$
       BEGIN
@@ -293,6 +327,33 @@ console.log('DB INFO:', dbInfo.rows[0]);
       )
     `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS auth_challenges (
+        id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        purpose     VARCHAR(30) NOT NULL CHECK (purpose IN ('phone_register','phone_password_reset')),
+        phone       VARCHAR(32) NOT NULL,
+        user_id     UUID REFERENCES users(id) ON DELETE CASCADE,
+        token_hash  VARCHAR(64) NOT NULL,
+        attempts    INTEGER NOT NULL DEFAULT 0,
+        expires_at  TIMESTAMPTZ NOT NULL,
+        used_at     TIMESTAMPTZ,
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS admin_audit_logs (
+        id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        admin_id     UUID REFERENCES users(id) ON DELETE SET NULL,
+        action       VARCHAR(60) NOT NULL,
+        target_type  VARCHAR(30) NOT NULL,
+        target_id    UUID,
+        reason       TEXT NOT NULL,
+        snapshot     JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at   TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
     // ── Indexes ────────────────────────────────────────────────
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_seller     ON listings(seller_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_city       ON listings(city)`);
@@ -319,6 +380,11 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_reviews_offer       ON reviews(offer_id)`);
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_unique_pair ON reviews(reviewer_id, reviewee_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_user_blocks_blocked ON user_blocks(blocked_id)`);
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique_lower ON users(LOWER(email)) WHERE email IS NOT NULL`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_users_account_status ON users(account_status)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_auth_challenges_phone_created ON auth_challenges(phone, created_at DESC)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires ON auth_challenges(expires_at) WHERE used_at IS NULL`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit_logs(created_at DESC)`);
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_phone_verification_attempts_user_created
       ON phone_verification_attempts(user_id, created_at DESC)

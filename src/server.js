@@ -8,6 +8,7 @@ const { scheduleMarketPriceUpdate } = require('./jobs/scheduleMarketPriceUpdate'
 const authRoutes     = require('./routes/auth');
 const listingRoutes  = require('./routes/listings');
 const offerRoutes    = require('./routes/offers');
+const adminRoutes    = require('./routes/admin');
 const { pricesRouter, usersRouter } = require('./routes/other');
 const errorHandler   = require('./middleware/errorHandler');
 const { scheduleReservedListingCleanup } = require('./jobs/cleanupReservedListings');
@@ -78,6 +79,7 @@ app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 app.use('/api/auth',     authRoutes);
 app.use('/api/listings', listingRoutes);
 app.use('/api/offers',   offerRoutes);
+app.use('/api/admin',    adminRoutes);
 app.use('/api/prices',   pricesRouter);
 app.use('/api/users',    usersRouter);
 

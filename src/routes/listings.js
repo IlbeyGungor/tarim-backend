@@ -45,7 +45,7 @@ router.get('/', authMiddleware.optional, async (req, res, next) => {
     const { search, category, city, listing_type, status, page = 1, limit = 20 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const params = [];
-    const conditions = ["l.status = 'active'"];
+    const conditions = ["l.status = 'active'", "u.account_status = 'active'"];
 
     if (status && status !== 'active') {
       return res.json({
@@ -105,7 +105,10 @@ router.get('/', authMiddleware.optional, async (req, res, next) => {
 // GET /api/listings/:id  (public)
 router.get('/:id', authMiddleware.optional, async (req, res, next) => {
   try {
-    const { rows } = await query(`${LISTING_SELECT} WHERE l.id=$1`, [req.params.id]);
+    const { rows } = await query(
+      `${LISTING_SELECT} WHERE l.id=$1 AND u.account_status='active'`,
+      [req.params.id]
+    );
     if (!rows.length) return res.status(404).json({ error: 'İlan bulunamadı.' });
 
     const listing = rows[0];
