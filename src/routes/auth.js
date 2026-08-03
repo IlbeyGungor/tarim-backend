@@ -8,7 +8,9 @@ const { query, getClient } = require('../db');
 const authMiddleware = require('../middleware/auth');
 const adminMiddleware = require('../middleware/admin');
 const { firebaseAuth } = require('../services/firebaseAdmin');
-const mailer = require('../services/mailer');
+const {
+  sendFirebasePasswordResetEmail,
+} = require('../services/firebasePasswordReset');
 
 const USER_COLUMNS = `
   id,name,phone,phone_verified,email,city,district,bio,tc_verified,cks_verified,
@@ -331,13 +333,7 @@ router.post('/password-reset/start', authLimiter, [
       if (!rows.length || rows[0].account_status !== 'active') {
         return res.json({ ok: true, channel: 'email', destination: maskEmail(email) });
       }
-      const link = await firebaseAuth().generatePasswordResetLink(email);
-      await mailer.sendMail({
-        from: process.env.SMTP_USER,
-        to: email,
-        subject: 'Tarım Pazar şifre sıfırlama',
-        text: `Tarım Pazar şifrenizi sıfırlamak için bu bağlantıyı kullanın:\n\n${link}\n\nBu isteği siz yapmadıysanız e-postayı yok sayabilirsiniz.`,
-      });
+      await sendFirebasePasswordResetEmail(email);
       return res.json({ ok: true, channel: 'email', destination: maskEmail(email) });
     }
 
