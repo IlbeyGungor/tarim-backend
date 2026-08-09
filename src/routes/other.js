@@ -255,6 +255,21 @@ pricesRouter.get('/:id/history-1y', async (req, res, next) => {
 // ── Users ──────────────────────────────────────────────────────────────────
 const usersRouter = require('express').Router();
 
+const USER_LISTING_SELECT = `
+  SELECT
+    l.*,
+    GREATEST(l.quantity - l.fulfilled_quantity, 0) AS remaining_quantity,
+    json_build_object(
+      'id', u.id, 'name', u.name, 'phone', u.phone,
+      'phone_verified', u.phone_verified, 'city', u.city, 'district', u.district,
+      'tc_verified', u.tc_verified, 'cks_verified', u.cks_verified,
+      'is_verified', u.is_verified, 'rating', u.rating,
+      'total_trades', u.total_trades, 'profile_image', u.profile_image
+    ) AS seller
+  FROM listings l
+  JOIN users u ON u.id=l.seller_id
+`;
+
 // POST /api/users/me/profile-image  (auth required)
 usersRouter.post(
   '/me/profile-image',
@@ -402,6 +417,60 @@ ${reportedUser?.profile_image || '-'}
     console.error('User report mail error:', err);
     next(err);
   }
+});
+
+// GET /api/users/:id/listings  (public; owner may include reserved listings)
+usersRouter.get('/:id/listings', authMiddleware.optional, async (req, res, next) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 50);
+    const offset = (page - 1) * limit;
+    const includeInactive = String(req.query.include_inactive || '').toLowerCase() === 'true';
+    const isOwner = req.user?.id === req.params.id;
+
+    if (includeInactive && !isOwner) {
+      return res.status(403).json({ error: 'Aktif olmayan ilanları yalnız ilan sahibi görebilir.' });
+    }
+
+    const { rows: userRows } = await query(
+      "SELECT id FROM users WHERE id=$1 AND account_status='active'",
+      [req.params.id]
+    );
+    if (!userRows.length) return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
+
+    if (req.user && !isOwner) {
+      const { rows: blockRows } = await query(`
+        SELECT 1 FROM user_blocks
+        WHERE (blocker_id=$1 AND blocked_id=$2)
+           OR (blocker_id=$2 AND blocked_id=$1)
+        LIMIT 1
+      `, [req.user.id, req.params.id]);
+      if (blockRows.length) return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
+    }
+
+    const params = [req.params.id];
+    const conditions = ['l.seller_id=$1', "u.account_status='active'"];
+    conditions.push(includeInactive ? "l.status IN ('active','reserved')" : "l.status='active'");
+
+    const excludeListingId = String(req.query.exclude_listing_id || '').trim();
+    if (excludeListingId) {
+      params.push(excludeListingId);
+      conditions.push(`l.id <> $${params.length}::uuid`);
+    }
+    const where = `WHERE ${conditions.join(' AND ')}`;
+    const countParams = [...params];
+    params.push(limit, offset);
+
+    const [{ rows }, { rows: countRows }] = await Promise.all([
+      query(
+        `${USER_LISTING_SELECT} ${where} ORDER BY l.created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+        params
+      ),
+      query(`SELECT COUNT(*) FROM listings l JOIN users u ON u.id=l.seller_id ${where}`, countParams),
+    ]);
+    const total = Number(countRows[0]?.count || 0);
+    res.json({ listings: rows, total, page, totalPages: Math.ceil(total / limit) });
+  } catch (err) { next(err); }
 });
 
 // GET /api/users/:id  (public profile)

@@ -26,12 +26,12 @@ const seed = async () => {
     const l1 = uuidv4(), l2 = uuidv4(), l3 = uuidv4(), l4 = uuidv4();
 
     await client.query(`
-      INSERT INTO listings (id,seller_id,crop_name,category,quantity,unit,price_per_unit,price_type,city,district,description,status,harvest_date)
+      INSERT INTO listings (id,seller_id,crop_name,category,quantity,unit,price_per_unit,price_unit,price_type,city,district,description,status,harvest_date)
       VALUES
-        ($1,$5,'Sofralık Zeytin','fruit',5000,'kg',18.50,'negotiate','İzmir','Ödemiş','Doğal ve ilaçsız yetiştirilmiş sofralık siyah zeytin. Paket veya dökme teslim.','active',CURRENT_DATE - 5),
-        ($2,$6,'Ekmeklik Buğday','grain',20000,'kg',8.20,'fixed','Konya','Çumra','Sertifikalı tohumdan, analiz belgeli ekmeklik buğday.','active',CURRENT_DATE - 30),
-        ($3,$5,'Kuru İncir','fruit',3000,'kg',55.00,'negotiate','İzmir','Ödemiş','AB standartlarına uygun kuru incir, ihracata hazır.','active',CURRENT_DATE - 10),
-        ($4,$6,'Tombul Fındık','nut',8000,'kg',85.00,'negotiate','Giresun','Merkez','İç fındık oranı 48%+, rutubet 6%, analiz belgeli.','active',CURRENT_DATE - 7)
+        ($1,$5,'Sofralık Zeytin','fruit',5000,'kg',18.50,'kg','negotiate','İzmir','Ödemiş','Doğal ve ilaçsız yetiştirilmiş sofralık siyah zeytin. Paket veya dökme teslim.','active',CURRENT_DATE - 5),
+        ($2,$6,'Ekmeklik Buğday','grain',20000,'kg',8.20,'kg','fixed','Konya','Çumra','Sertifikalı tohumdan, analiz belgeli ekmeklik buğday.','active',CURRENT_DATE - 30),
+        ($3,$5,'Kuru İncir','fruit',3000,'kg',55.00,'kg','negotiate','İzmir','Ödemiş','AB standartlarına uygun kuru incir, ihracata hazır.','active',CURRENT_DATE - 10),
+        ($4,$6,'Tombul Fındık','nut',8000,'kg',85.00,'kg','negotiate','Giresun','Merkez','İç fındık oranı 48%+, rutubet 6%, analiz belgeli.','active',CURRENT_DATE - 7)
     `, [l1, l2, l3, l4, u1, u2]);
 
     // ── Market prices ──────────────────────────────────────────

@@ -103,7 +103,8 @@ console.log('DB INFO:', dbInfo.rows[0]);
         category        VARCHAR(40)  NOT NULL CHECK (category IN ('grain','vegetable','fruit','nut','legume','other')),
         quantity        NUMERIC(12,2) NOT NULL,
         unit            VARCHAR(20)  NOT NULL DEFAULT 'kg',
-        price_per_unit  NUMERIC(10,2) NOT NULL,
+        price_per_unit  NUMERIC(10,2),
+        price_unit      VARCHAR(20)  NOT NULL DEFAULT 'kg',
         price_type      VARCHAR(20)  NOT NULL CHECK (price_type IN ('fixed','negotiate')) DEFAULT 'negotiate',
         city            VARCHAR(80),
         district        VARCHAR(80),
@@ -149,6 +150,43 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS reserved_until TIMESTAMPTZ`);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS listing_type VARCHAR(10) NOT NULL DEFAULT 'sell'`);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS fulfilled_quantity NUMERIC(12,2) NOT NULL DEFAULT 0`);
+    await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS price_unit VARCHAR(20)`);
+    await client.query(`UPDATE listings SET price_unit=unit WHERE price_unit IS NULL OR BTRIM(price_unit)=''`);
+    await client.query(`ALTER TABLE listings ALTER COLUMN price_unit SET DEFAULT 'kg'`);
+    await client.query(`ALTER TABLE listings ALTER COLUMN price_unit SET NOT NULL`);
+    await client.query(`ALTER TABLE listings ALTER COLUMN price_per_unit DROP NOT NULL`);
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname='listings_price_positive_check'
+            AND conrelid='listings'::regclass
+        ) THEN
+          ALTER TABLE listings ADD CONSTRAINT listings_price_positive_check
+          CHECK (price_per_unit IS NULL OR price_per_unit > 0);
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname='listings_price_required_type_check'
+            AND conrelid='listings'::regclass
+        ) THEN
+          ALTER TABLE listings ADD CONSTRAINT listings_price_required_type_check
+          CHECK (price_per_unit IS NOT NULL OR price_type='negotiate');
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname='listings_unit_compatibility_check'
+            AND conrelid='listings'::regclass
+        ) THEN
+          ALTER TABLE listings ADD CONSTRAINT listings_unit_compatibility_check
+          CHECK (
+            (unit IN ('kg','ton') AND price_unit IN ('kg','ton'))
+            OR (unit IN ('adet','kasa','çuval') AND price_unit=unit)
+          );
+        END IF;
+      END $$;
+    `);
     await client.query(`
       DO $$
       BEGIN
@@ -359,6 +397,10 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_city       ON listings(city)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_category   ON listings(category)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_status     ON listings(status)`);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_listings_seller_status_created
+      ON listings(seller_id, status, created_at DESC)
+    `);
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_listings_active_type_created
       ON listings(listing_type, created_at DESC)

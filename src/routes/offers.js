@@ -191,6 +191,7 @@ router.get('/chats', authMiddleware, async (req, res, next) => {
           'city', l.city,
           'district', l.district,
           'unit', l.unit,
+          'price_unit', l.price_unit,
           'price_per_unit', l.price_per_unit,
           'listing_type', l.listing_type,
           'quantity', l.quantity,
@@ -356,7 +357,7 @@ router.get('/my', authMiddleware, async (req, res, next) => {
     const { rows } = await query(`
       SELECT o.*,
         json_build_object('id',l.id,'crop_name',l.crop_name,'city',l.city,
-          'district',l.district,'unit',l.unit,'price_per_unit',l.price_per_unit,
+          'district',l.district,'unit',l.unit,'price_unit',l.price_unit,'price_per_unit',l.price_per_unit,
           'listing_type',l.listing_type,'quantity',l.quantity,
           'fulfilled_quantity',l.fulfilled_quantity,
           'remaining_quantity',GREATEST(l.quantity-l.fulfilled_quantity,0)) AS listing,
@@ -383,7 +384,7 @@ router.get('/received', authMiddleware, async (req, res, next) => {
   try {
     const { rows } = await query(`
       SELECT o.*,
-        json_build_object('id',l.id,'crop_name',l.crop_name,'city',l.city,'district',l.district,'unit',l.unit,'price_per_unit',l.price_per_unit,
+        json_build_object('id',l.id,'crop_name',l.crop_name,'city',l.city,'district',l.district,'unit',l.unit,'price_unit',l.price_unit,'price_per_unit',l.price_per_unit,
           'listing_type',l.listing_type,'quantity',l.quantity,
           'fulfilled_quantity',l.fulfilled_quantity,
           'remaining_quantity',GREATEST(l.quantity-l.fulfilled_quantity,0)) AS listing,
@@ -472,7 +473,7 @@ router.post('/', authMiddleware, [
       actionType: 'initial_offer',
       price: offered_price,
       quantity,
-      unit: listing.unit,
+      unit: listing.price_unit,
     });
 
     await client.query('UPDATE listings SET offer_count=offer_count+1 WHERE id=$1', [listing_id]);
@@ -486,7 +487,7 @@ router.post('/', authMiddleware, [
       proposerName:  buyerRows[0]?.name || (listing.listing_type === 'buy' ? 'Bir satıcı' : 'Bir alıcı'),
       cropName:      listing.crop_name,
       offeredPrice:  offered_price,
-      unit:          listing.unit,
+      unit:          listing.price_unit,
       offerId:       rows[0].id,
       listingId:     listing_id,
       listingType:   listing.listing_type,
@@ -500,6 +501,7 @@ router.post('/', authMiddleware, [
         city: listing.city,
         district: listing.district,
         unit: listing.unit,
+        price_unit: listing.price_unit,
         price_per_unit: listing.price_per_unit,
         listing_type: listing.listing_type,
         quantity: listing.quantity,
@@ -530,7 +532,7 @@ router.patch('/:id/respond', authMiddleware, [
     let acceptance = null;
 
     const { rows: offerRows } = await client.query(`
-      SELECT o.*, l.seller_id, l.crop_name, l.unit, l.listing_type,
+      SELECT o.*, l.seller_id, l.crop_name, l.unit, l.price_unit, l.listing_type,
              l.status AS listing_status,
              buyer.name AS buyer_name, seller.name AS seller_name
       FROM offers o
@@ -594,7 +596,7 @@ router.patch('/:id/respond', authMiddleware, [
         actionType: 'seller_counter',
         price: counter_price,
         quantity: offer.quantity,
-        unit: offer.unit,
+        unit: offer.price_unit,
       });
     }
 
@@ -631,7 +633,7 @@ router.patch('/:id/respond', authMiddleware, [
         senderName: offer.seller_name,
         cropName: offer.crop_name,
         counterPrice: counter_price,
-        unit: offer.unit,
+        unit: offer.price_unit,
         offerId: req.params.id,
         madeBy: 'seller',
         actorRole: offer.listing_type === 'buy' ? 'Alıcı' : 'Satıcı',
@@ -665,7 +667,7 @@ router.patch('/:id/buyer-respond', authMiddleware, [
     let acceptance = null;
 
     const { rows: offerRows } = await client.query(`
-      SELECT o.*, l.seller_id, l.crop_name, l.unit, l.listing_type,
+      SELECT o.*, l.seller_id, l.crop_name, l.unit, l.price_unit, l.listing_type,
              l.status AS listing_status,
              buyer.name AS buyer_name, seller.name AS seller_name
       FROM offers o
@@ -729,7 +731,7 @@ router.patch('/:id/buyer-respond', authMiddleware, [
         actionType: 'buyer_counter',
         price: counter_price,
         quantity: offer.quantity,
-        unit: offer.unit,
+        unit: offer.price_unit,
       });
     }
 
@@ -767,7 +769,7 @@ router.patch('/:id/buyer-respond', authMiddleware, [
         proposerName: offer.buyer_name,
         cropName: offer.crop_name,
         finalPrice: counter_price,
-        unit: offer.unit,
+        unit: offer.price_unit,
         offerId: req.params.id,
         listingId: offer.listing_id,
       }));
@@ -798,7 +800,7 @@ router.patch('/:id/edit-counter', authMiddleware, [
     const { counter_price, message } = req.body;
     const textProvided = Object.prototype.hasOwnProperty.call(req.body, 'message');
     const { rows: offerRows } = await client.query(
-      'SELECT o.*, l.seller_id, l.unit FROM offers o JOIN listings l ON l.id=o.listing_id WHERE o.id=$1',
+      'SELECT o.*, l.seller_id, l.unit, l.price_unit FROM offers o JOIN listings l ON l.id=o.listing_id WHERE o.id=$1',
       [req.params.id]
     );
     if (!offerRows.length) {
@@ -829,7 +831,7 @@ router.patch('/:id/edit-counter', authMiddleware, [
       actionType: isSeller ? 'seller_counter' : 'buyer_counter',
       price: counter_price,
       quantity: offerRows[0].quantity,
-      unit: offerRows[0].unit,
+      unit: offerRows[0].price_unit,
     });
     await client.query('COMMIT');
     res.json(rows[0]);

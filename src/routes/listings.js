@@ -5,6 +5,10 @@ const authMiddleware = require('../middleware/auth');
 const { rateLimit } = require('express-rate-limit');
 const mailer = require('../services/mailer');
 const notify = require('../utils/notify');
+const {
+  isListingUnit,
+  areListingUnitsCompatible,
+} = require('../utils/listingUnits');
 
 function sendNotification(type, promise) {
   promise.catch((err) => {
@@ -197,7 +201,10 @@ router.post('/', authMiddleware, [
   body('crop_name').trim().notEmpty().withMessage('Ürün adı zorunludur.'),
   body('category').isIn(['grain','vegetable','fruit','nut','legume','other']),
   body('quantity').isFloat({ gt: 0 }),
-  body('price_per_unit').isFloat({ gt: 0 }),
+  body('unit').optional().custom(isListingUnit),
+  body('price_unit').optional().custom(isListingUnit),
+  body('price_per_unit').optional({ nullable: true }).isFloat({ gt: 0 }),
+  body('price_type').optional().isIn(['fixed','negotiate']),
 ], async (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
@@ -205,16 +212,24 @@ router.post('/', authMiddleware, [
   try {
     const {
       listing_type = 'sell', crop_name, category, quantity, unit = 'kg',
-      price_per_unit, price_type = 'negotiate',
+      price_per_unit, price_unit = unit, price_type = 'negotiate',
       city, district, address, description, harvest_date
     } = req.body;
 
+    if (!areListingUnitsCompatible(unit, price_unit)) {
+      return res.status(400).json({ error: 'Miktar ve fiyat birimleri birbiriyle uyumlu değil.' });
+    }
+    const normalizedPrice = price_per_unit == null || price_per_unit === ''
+      ? null
+      : Number(price_per_unit);
+    const normalizedPriceType = normalizedPrice == null ? 'negotiate' : price_type;
+
     const { rows } = await query(`
       INSERT INTO listings
-        (seller_id,listing_type,crop_name,category,quantity,unit,price_per_unit,price_type,city,district,address,description,harvest_date)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        (seller_id,listing_type,crop_name,category,quantity,unit,price_per_unit,price_unit,price_type,city,district,address,description,harvest_date)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
       RETURNING *
-    `, [req.user.id, listing_type, crop_name, category, quantity, unit, price_per_unit, price_type,
+    `, [req.user.id, listing_type, crop_name, category, quantity, unit, normalizedPrice, price_unit, normalizedPriceType,
         city||null, district||null, address||null, description||null, harvest_date||null]);
 
     res.status(201).json(rows[0]);
@@ -296,14 +311,32 @@ router.patch('/:id', authMiddleware, async (req, res, next) => {
         });
       }
     }
-    if (
-      req.body.price_per_unit !== undefined &&
-      !(Number(req.body.price_per_unit) > 0)
-    ) {
+    if (req.body.price_per_unit !== undefined && req.body.price_per_unit !== null &&
+        req.body.price_per_unit !== '' && !(Number(req.body.price_per_unit) > 0)) {
       return res.status(400).json({ error: 'Birim fiyat sıfırdan büyük olmalıdır.' });
     }
+    if (req.body.price_type !== undefined &&
+        !['fixed', 'negotiate'].includes(req.body.price_type)) {
+      return res.status(400).json({ error: 'Geçersiz fiyat tipi.' });
+    }
 
-    const allowed = ['crop_name','quantity','price_per_unit','price_type','description','harvest_date'];
+    const nextUnit = req.body.unit ?? existing[0].unit;
+    const nextPriceUnit = req.body.price_unit ?? existing[0].price_unit ?? nextUnit;
+    if (!isListingUnit(nextUnit) || !isListingUnit(nextPriceUnit) ||
+        !areListingUnitsCompatible(nextUnit, nextPriceUnit)) {
+      return res.status(400).json({ error: 'Miktar ve fiyat birimleri birbiriyle uyumlu değil.' });
+    }
+
+    const priceWasProvided = Object.prototype.hasOwnProperty.call(req.body, 'price_per_unit');
+    const finalPrice = priceWasProvided
+      ? (req.body.price_per_unit === '' ? null : req.body.price_per_unit)
+      : existing[0].price_per_unit;
+    if (finalPrice == null) {
+      req.body.price_per_unit = null;
+      req.body.price_type = 'negotiate';
+    }
+
+    const allowed = ['crop_name','quantity','unit','price_per_unit','price_unit','price_type','description','harvest_date'];
     const sets = [], params = [];
     for (const key of allowed) {
       if (req.body[key] !== undefined) {
