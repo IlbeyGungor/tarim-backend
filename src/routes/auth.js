@@ -11,6 +11,7 @@ const { firebaseAuth } = require('../services/firebaseAdmin');
 const {
   sendFirebasePasswordResetEmail,
 } = require('../services/firebasePasswordReset');
+const { recordUserActivity } = require('../services/userActivity');
 
 const USER_COLUMNS = `
   id,name,phone,phone_verified,email,city,district,bio,tc_verified,cks_verified,
@@ -482,6 +483,20 @@ router.get('/me', authMiddleware, async (req, res, next) => {
     const result = await query(`SELECT ${USER_COLUMNS} FROM users WHERE id=$1`, [req.user.id]);
     if (!result.rows.length) return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
     res.json(publicUser(result.rows[0]));
+  } catch (err) { next(err); }
+});
+
+router.post('/activity', authMiddleware, async (req, res, next) => {
+  try {
+    const activity = await recordUserActivity(req.user.id);
+    if (!activity) {
+      return res.status(404).json({ error: 'Aktif kullanıcı bulunamadı.' });
+    }
+    res.json({
+      ok: true,
+      last_active_at: activity.last_active_at,
+      activity_date: activity.activity_date,
+    });
   } catch (err) { next(err); }
 });
 

@@ -43,6 +43,7 @@ console.log('DB INFO:', dbInfo.rows[0]);
         rating          NUMERIC(3,2) DEFAULT 0.0,
         total_trades    INTEGER DEFAULT 0,
         profile_image   TEXT,
+        last_active_at  TIMESTAMPTZ,
         created_at      TIMESTAMPTZ DEFAULT NOW(),
         updated_at      TIMESTAMPTZ DEFAULT NOW()
       )
@@ -57,6 +58,7 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS account_status VARCHAR(20) NOT NULL DEFAULT 'active'`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image TEXT`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ`);
     await client.query(`ALTER TABLE users ALTER COLUMN phone DROP NOT NULL`);
     await client.query(`ALTER TABLE users ALTER COLUMN profile_image TYPE TEXT`);
     await client.query(`
@@ -392,6 +394,17 @@ console.log('DB INFO:', dbInfo.rows[0]);
       )
     `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS user_activity_daily (
+        user_id          UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        activity_date    DATE NOT NULL,
+        first_active_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_active_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        ping_count       INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (user_id, activity_date)
+      )
+    `);
+
     // ── Indexes ────────────────────────────────────────────────
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_seller     ON listings(seller_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_city       ON listings(city)`);
@@ -424,6 +437,8 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_user_blocks_blocked ON user_blocks(blocked_id)`);
     await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique_lower ON users(LOWER(email)) WHERE email IS NOT NULL`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_users_account_status ON users(account_status)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_users_last_active ON users(last_active_at DESC)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_user_activity_date ON user_activity_daily(activity_date DESC)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_auth_challenges_phone_created ON auth_challenges(phone, created_at DESC)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires ON auth_challenges(expires_at) WHERE used_at IS NULL`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit_logs(created_at DESC)`);

@@ -4,6 +4,10 @@ const { query, getClient } = require('../db');
 const authMiddleware = require('../middleware/auth');
 const adminMiddleware = require('../middleware/admin');
 const { firebaseAuth } = require('../services/firebaseAdmin');
+const {
+  ISTANBUL_DATE_SQL,
+  normalizeAnalyticsDays,
+} = require('../services/userActivity');
 
 router.use(authMiddleware, adminMiddleware);
 
@@ -57,7 +61,9 @@ router.get('/users', async (req, res, next) => {
       query(`
         SELECT u.id,u.name,u.email,u.phone,u.phone_verified,u.profile_image,u.city,u.district,
                u.is_admin,u.account_status,u.auth_providers,u.has_local_password,u.created_at,
-               (SELECT COUNT(*)::int FROM listings l WHERE l.seller_id=u.id) AS listing_count
+               u.last_active_at,
+               (SELECT COUNT(*)::int FROM listings l WHERE l.seller_id=u.id) AS listing_count,
+               (SELECT COUNT(*)::int FROM offers o WHERE o.buyer_id=u.id) AS offer_count
         FROM users u ${clause}
         ORDER BY u.created_at DESC
         LIMIT $${params.length - 1} OFFSET $${params.length}
@@ -65,6 +71,57 @@ router.get('/users', async (req, res, next) => {
       query(`SELECT COUNT(*)::int AS count FROM users u ${clause}`, countParams),
     ]);
     res.json({ users: rows, total: countResult.rows[0].count, page, limit });
+  } catch (err) { next(err); }
+});
+
+router.get('/analytics', async (req, res, next) => {
+  try {
+    const days = normalizeAnalyticsDays(req.query.days);
+    const [summaryResult, dailyResult] = await Promise.all([
+      query(`
+        SELECT
+          (SELECT COUNT(*)::int FROM users) AS total_users,
+          (SELECT COUNT(*)::int FROM users WHERE account_status='active') AS active_accounts,
+          (SELECT COUNT(DISTINCT user_id)::int FROM user_activity_daily
+            WHERE activity_date >= ${ISTANBUL_DATE_SQL} - 6) AS active_users_7d,
+          (SELECT COUNT(DISTINCT user_id)::int FROM user_activity_daily
+            WHERE activity_date >= ${ISTANBUL_DATE_SQL} - 29) AS active_users_30d,
+          (SELECT COUNT(*)::int FROM users
+            WHERE created_at >= NOW() - INTERVAL '7 days') AS new_users_7d,
+          (SELECT COUNT(*)::int FROM users
+            WHERE created_at >= NOW() - INTERVAL '30 days') AS new_users_30d,
+          (SELECT COUNT(*)::int FROM listings) AS total_listings,
+          (SELECT COUNT(*)::int FROM listings WHERE status='active') AS active_listings,
+          (SELECT COUNT(*)::int FROM offers) AS total_offers,
+          (SELECT COUNT(*)::int FROM offers WHERE status='accepted') AS accepted_offers,
+          COALESCE((SELECT ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT seller_id),0),2)
+            FROM listings),0) AS listings_per_listing_owner,
+          COALESCE((SELECT ROUND(COUNT(*)::numeric / NULLIF(COUNT(DISTINCT buyer_id),0),2)
+            FROM offers),0) AS offers_per_offer_user
+      `),
+      query(`
+        WITH dates AS (
+          SELECT generate_series(
+            ${ISTANBUL_DATE_SQL} - ($1::int - 1),
+            ${ISTANBUL_DATE_SQL},
+            INTERVAL '1 day'
+          )::date AS activity_date
+        )
+        SELECT dates.activity_date,
+               COUNT(DISTINCT activity.user_id)::int AS active_users,
+               COALESCE(SUM(activity.ping_count),0)::int AS ping_count
+        FROM dates
+        LEFT JOIN user_activity_daily activity
+          ON activity.activity_date=dates.activity_date
+        GROUP BY dates.activity_date
+        ORDER BY dates.activity_date
+      `, [days]),
+    ]);
+    res.json({
+      days,
+      summary: summaryResult.rows[0],
+      daily_activity: dailyResult.rows,
+    });
   } catch (err) { next(err); }
 });
 
@@ -238,3 +295,5 @@ router.delete('/listings/:id', [
 });
 
 module.exports = router;
+
+router.testHelpers = { paging, normalizeAnalyticsDays };
