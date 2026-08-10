@@ -58,6 +58,14 @@ async function sendToUser(userId, { title, body, data = {} }) {
           },
         },
       },
+      android: {
+        priority: 'high',
+        notification: {
+          icon: 'ic_stat_tarim_pazar',
+          color: '#34C759',
+          sound: 'default',
+        },
+      },
       tokens,
     };
 
