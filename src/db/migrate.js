@@ -63,6 +63,7 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS match_notifications_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS personalization_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS favorite_product_notifications_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
     await client.query(`ALTER TABLE users ALTER COLUMN phone DROP NOT NULL`);
     await client.query(`ALTER TABLE users ALTER COLUMN profile_image TYPE TEXT`);
     await client.query(`
@@ -465,11 +466,24 @@ console.log('DB INFO:', dbInfo.rows[0]);
       )
     `);
     await client.query(`
+      CREATE TABLE IF NOT EXISTS user_favorite_products (
+        user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        product_family_key  VARCHAR(180) NOT NULL,
+        product_key         VARCHAR(160) NOT NULL,
+        display_name        VARCHAR(160) NOT NULL,
+        category            VARCHAR(40),
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (user_id,product_family_key)
+      )
+    `);
+    await client.query(`
       CREATE TABLE IF NOT EXISTS listing_match_outbox (
         id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
         new_listing_id      UUID NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
         matched_listing_id  UUID REFERENCES listings(id) ON DELETE SET NULL,
         recipient_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        match_reason        VARCHAR(30) NOT NULL DEFAULT 'opposite_listing'
+                            CHECK (match_reason IN ('opposite_listing','favorite_product')),
         status              VARCHAR(20) NOT NULL DEFAULT 'pending'
                             CHECK (status IN ('pending','sent','failed')),
         attempts            INTEGER NOT NULL DEFAULT 0,
@@ -481,6 +495,13 @@ console.log('DB INFO:', dbInfo.rows[0]);
       )
     `);
     await client.query(`ALTER TABLE listing_match_outbox ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ`);
+    await client.query(`ALTER TABLE listing_match_outbox ADD COLUMN IF NOT EXISTS match_reason VARCHAR(30) NOT NULL DEFAULT 'opposite_listing'`);
+    await client.query(`ALTER TABLE listing_match_outbox DROP CONSTRAINT IF EXISTS listing_match_outbox_match_reason_check`);
+    await client.query(`
+      ALTER TABLE listing_match_outbox
+      ADD CONSTRAINT listing_match_outbox_match_reason_check
+      CHECK (match_reason IN ('opposite_listing','favorite_product'))
+    `);
     await client.query(`ALTER TABLE listing_match_outbox DROP CONSTRAINT IF EXISTS listing_match_outbox_status_check`);
     await client.query(`
       ALTER TABLE listing_match_outbox
@@ -637,6 +658,7 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listing_match_outbox_recipient_created ON listing_match_outbox(recipient_id,created_at DESC)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listing_match_outbox_terminal_cleanup ON listing_match_outbox(status,created_at) WHERE status IN ('sent','permanent_failed')`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listing_match_outbox_processing_claimed ON listing_match_outbox(claimed_at) WHERE status='processing'`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_user_favorite_products_family ON user_favorite_products(product_family_key,user_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listing_match_jobs_retry ON listing_match_jobs(status,next_attempt_at) WHERE status IN ('pending','failed','processing')`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listing_match_jobs_processing_claimed ON listing_match_jobs(claimed_at) WHERE status='processing'`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listing_match_daily_counts_date ON listing_match_daily_counts(notification_date)`);

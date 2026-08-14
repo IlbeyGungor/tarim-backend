@@ -189,13 +189,16 @@ const notify = {
     });
   },
 
-  async listingMatch({ recipientId, cropName, newListingType, listingId }) {
+  async listingMatch({ recipientId, cropName, newListingType, listingId, matchReason }) {
     const isBuyerListing = newListingType === 'buy';
+    const listingTypeLabel = isBuyerListing ? 'Aranıyor' : 'Satılık';
     return sendToUser(recipientId, {
       title: 'Yeni İlan Eşleşmesi',
-      body: isBuyerListing
-        ? `${cropName} arayan yeni bir ilan yayınlandı.`
-        : `${cropName} satan yeni bir ilan yayınlandı.`,
+      body: matchReason === 'favorite_product'
+        ? `Favorilerinizdeki ${cropName} için yeni ${listingTypeLabel} ilan yayınlandı.`
+        : isBuyerListing
+          ? `${cropName} arayan yeni bir ilan yayınlandı.`
+          : `${cropName} satan yeni bir ilan yayınlandı.`,
       data: { type: 'listing_match', listing_id: String(listingId) },
     });
   },

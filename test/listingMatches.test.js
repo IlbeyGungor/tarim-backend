@@ -4,6 +4,7 @@ const {
   claimListingMatchJobs,
   claimPendingNotifications,
   cleanupListingMatchRecords,
+  expandListingMatchJob,
   queueListingMatches,
 } = require('../src/services/listingMatches');
 
@@ -49,4 +50,35 @@ test('terminal match records are retained for seven days', async () => {
   assert.match(statements[0], /INTERVAL '7 days'/);
   assert.match(statements[0], /permanent_failed/);
   assert.match(statements[1], /INTERVAL '7 days'/);
+});
+
+test('match expansion combines opposite listings and favorite subscribers', async () => {
+  const statements = [];
+  const client = {
+    query: async (sql) => {
+      statements.push(sql);
+      if (/SELECT id,seller_id,listing_type,product_family_key/.test(sql)) {
+        return {
+          rows: [{
+            id: 'listing-1',
+            seller_id: 'seller-1',
+            listing_type: 'sell',
+            product_family_key: 'limon',
+          }],
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+    release() {},
+  };
+  await expandListingMatchJob(
+    { listing_id: 'listing-1', attempts: 1 },
+    { getClientFn: async () => client, queryFn: async () => ({ rows: [] }) },
+  );
+  const expansion = statements.find((sql) => /raw_candidates/.test(sql));
+  assert.ok(expansion);
+  assert.match(expansion, /user_favorite_products/);
+  assert.match(expansion, /favorite_product_notifications_enabled/);
+  assert.match(expansion, /favorite_product/);
+  assert.match(expansion, /listing_match_daily_counts/);
 });

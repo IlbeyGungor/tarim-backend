@@ -4,6 +4,7 @@ const {
   buildCatalogItems,
   normalizeTurkish,
   resolveProductIdentity,
+  selectFavoriteCatalogItems,
 } = require('../src/utils/productCatalog');
 
 test('Turkish names normalize deterministically', () => {
@@ -44,4 +45,31 @@ test('catalog deduplicates normalized product names', () => {
   assert.equal(items.length, 2);
   assert.equal(items[0].family_key, 'limon');
   assert.equal(items[1].family_key, 'limon');
+});
+
+test('catalog exposes one canonical family name for product variants', () => {
+  const catalog = buildCatalogItems([
+    { product: 'Mayer Limon' },
+    { product: 'Enter Limon' },
+    { product: 'Limon' },
+  ]);
+  assert.ok(catalog.every((item) => item.family_display_name === 'Limon'));
+});
+
+test('favorite selection validates keys and deduplicates families', () => {
+  const catalog = buildCatalogItems([
+    { product: 'Mayer Limon' },
+    { product: 'Enter Limon' },
+    { product: 'Elma' },
+  ]);
+  const selection = selectFavoriteCatalogItems(
+    ['mayer-limon', 'enter-limon', 'elma', 'missing'],
+    catalog
+  );
+  assert.deepEqual(selection.invalidProductKeys, ['missing']);
+  assert.equal(selection.items.length, 2);
+  assert.deepEqual(
+    new Set(selection.items.map((item) => item.family_key)),
+    new Set(['limon', 'elma'])
+  );
 });

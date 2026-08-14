@@ -58,8 +58,8 @@ async function claimListingMatchJobs({
   return rows;
 }
 
-async function expandListingMatchJob(job) {
-  const client = await getClient();
+async function expandListingMatchJob(job, { getClientFn = getClient, queryFn = query } = {}) {
+  const client = await getClientFn();
   try {
     await client.query('BEGIN');
     const { rows: listingRows } = await client.query(`
@@ -72,10 +72,11 @@ async function expandListingMatchJob(job) {
     if (listing) {
       const oppositeType = listing.listing_type === 'buy' ? 'sell' : 'buy';
       await client.query(`
-        WITH candidates AS (
+        WITH raw_candidates AS (
           SELECT DISTINCT ON (l.seller_id)
             l.seller_id AS recipient_id,
-            l.id AS matched_listing_id
+            l.id AS matched_listing_id,
+            false AS favorite_match
           FROM listings l
           JOIN users u ON u.id=l.seller_id
           WHERE l.status='active'
@@ -84,12 +85,30 @@ async function expandListingMatchJob(job) {
             AND l.seller_id<>$3
             AND u.account_status='active'
             AND u.match_notifications_enabled=true
-            AND NOT EXISTS (
-              SELECT 1 FROM user_blocks ub
-              WHERE (ub.blocker_id=l.seller_id AND ub.blocked_id=$3)
-                 OR (ub.blocker_id=$3 AND ub.blocked_id=l.seller_id)
-            )
           ORDER BY l.seller_id,l.created_at DESC
+          UNION ALL
+          SELECT fp.user_id AS recipient_id,
+                 NULL::uuid AS matched_listing_id,
+                 true AS favorite_match
+          FROM user_favorite_products fp
+          JOIN users u ON u.id=fp.user_id
+          WHERE fp.product_family_key=$2
+            AND fp.user_id<>$3
+            AND u.account_status='active'
+            AND u.favorite_product_notifications_enabled=true
+        ), candidates AS (
+          SELECT rc.recipient_id,
+                 (ARRAY_AGG(rc.matched_listing_id)
+                   FILTER (WHERE rc.matched_listing_id IS NOT NULL))[1]
+                   AS matched_listing_id,
+                 BOOL_OR(rc.favorite_match) AS favorite_match
+          FROM raw_candidates rc
+          WHERE NOT EXISTS (
+            SELECT 1 FROM user_blocks ub
+            WHERE (ub.blocker_id=rc.recipient_id AND ub.blocked_id=$3)
+               OR (ub.blocker_id=$3 AND ub.blocked_id=rc.recipient_id)
+          )
+          GROUP BY rc.recipient_id
         ), admitted AS (
           INSERT INTO listing_match_daily_counts
             (recipient_id,notification_date,notification_count)
@@ -104,8 +123,10 @@ async function expandListingMatchJob(job) {
           RETURNING recipient_id
         )
         INSERT INTO listing_match_outbox
-          (new_listing_id,matched_listing_id,recipient_id)
-        SELECT $4,c.matched_listing_id,c.recipient_id
+          (new_listing_id,matched_listing_id,recipient_id,match_reason)
+        SELECT $4,c.matched_listing_id,c.recipient_id,
+               CASE WHEN c.favorite_match THEN 'favorite_product'
+                    ELSE 'opposite_listing' END
         FROM candidates c
         JOIN admitted a USING (recipient_id)
         ON CONFLICT (new_listing_id,recipient_id) DO NOTHING
@@ -120,7 +141,7 @@ async function expandListingMatchJob(job) {
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     const terminal = Number(job.attempts) >= MAX_ATTEMPTS;
-    await query(`
+    await queryFn(`
       UPDATE listing_match_jobs
       SET status=$2,claimed_at=NULL,last_error=$3,
           next_attempt_at=NOW()+(INTERVAL '5 minutes' * LEAST(attempts,3))
@@ -183,9 +204,31 @@ async function claimPendingNotifications({
       WHERE o.id=c.id
       RETURNING o.*
     )
-    SELECT c.*,l.crop_name,l.listing_type
+    SELECT c.*,l.crop_name,l.listing_type,l.product_family_key,
+           CASE
+             WHEN l.status<>'active' THEN false
+             WHEN u.account_status<>'active' THEN false
+             WHEN EXISTS (
+               SELECT 1 FROM user_blocks ub
+               WHERE (ub.blocker_id=c.recipient_id AND ub.blocked_id=l.seller_id)
+                  OR (ub.blocker_id=l.seller_id AND ub.blocked_id=c.recipient_id)
+             ) THEN false
+             WHEN c.match_reason='favorite_product' THEN
+               u.favorite_product_notifications_enabled AND EXISTS (
+                 SELECT 1 FROM user_favorite_products fp
+                 WHERE fp.user_id=c.recipient_id
+                   AND fp.product_family_key=l.product_family_key
+               )
+             ELSE
+               u.match_notifications_enabled AND EXISTS (
+                 SELECT 1 FROM listings matched
+                 WHERE matched.id=c.matched_listing_id
+                   AND matched.status='active'
+               )
+           END AS still_eligible
     FROM claimed c
     JOIN listings l ON l.id=c.new_listing_id
+    JOIN users u ON u.id=c.recipient_id
   `, params);
   return rows;
 }
@@ -193,6 +236,15 @@ async function claimPendingNotifications({
 async function dispatchPendingListingMatches(options = {}) {
   const rows = await claimPendingNotifications(options);
   for (const item of rows) {
+    if (!item.still_eligible) {
+      await query(`
+        UPDATE listing_match_outbox
+        SET status='permanent_failed',claimed_at=NULL,
+            last_error='Bildirim tercihi veya eşleşme artık geçerli değil.'
+        WHERE id=$1
+      `, [item.id]);
+      continue;
+    }
     let result;
     try {
       result = await notify.listingMatch({
@@ -200,6 +252,7 @@ async function dispatchPendingListingMatches(options = {}) {
         cropName: item.crop_name,
         newListingType: item.listing_type,
         listingId: item.new_listing_id,
+        matchReason: item.match_reason,
       });
     } catch (error) {
       result = { sent: false, retryable: true, reason: error.message };

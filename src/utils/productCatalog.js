@@ -28,6 +28,17 @@ const FAMILY_ALIASES = {
   'yer-fistigi': ['yer fistigi'],
 };
 
+const FAMILY_DISPLAY_NAMES = {
+  limon: 'Limon',
+  elma: 'Elma',
+  uzum: 'Üzüm',
+  salatalik: 'Salatalık',
+  sogan: 'Soğan',
+  fistik: 'Fıstık',
+  'antep-fistigi': 'Antep Fıstığı',
+  'yer-fistigi': 'Yer Fıstığı',
+};
+
 const DISPLAY_CORRECTIONS = {
   'lolorosso kivircik kirmizi marul kivircik': 'Lolorosso (Kirmizi Kivircik)',
   'limon grass limon otu': 'Limon Otu',
@@ -92,6 +103,10 @@ function resolveProductIdentity(rawName, category, catalogProductKey = null) {
   };
 }
 
+function familyDisplayNameFor(identity) {
+  return FAMILY_DISPLAY_NAMES[identity.family_key] || identity.display_name;
+}
+
 function buildCatalogItems(rows) {
   const byKey = new Map();
   for (const row of rows || []) {
@@ -108,16 +123,49 @@ function buildCatalogItems(rows) {
       byKey.set(identity.product_key, candidate);
     }
   }
-  return [...byKey.values()].sort((a, b) =>
-    a.display_name.localeCompare(b.display_name, 'tr')
+  const items = [...byKey.values()];
+  const familyNames = new Map();
+  for (const item of items) {
+    const explicit = FAMILY_DISPLAY_NAMES[item.family_key];
+    const current = familyNames.get(item.family_key);
+    const candidate = explicit || item.display_name;
+    if (!current || candidate.length < current.length) {
+      familyNames.set(item.family_key, candidate);
+    }
+  }
+  return items
+    .map((item) => ({
+      ...item,
+      family_display_name: familyNames.get(item.family_key) || item.display_name,
+    }))
+    .sort((a, b) => a.display_name.localeCompare(b.display_name, 'tr'));
+}
+
+function selectFavoriteCatalogItems(productKeys, catalog) {
+  const uniqueKeys = [...new Set(
+    (productKeys || []).map((key) => String(key).trim()).filter(Boolean)
+  )];
+  const byProductKey = new Map(
+    (catalog || []).map((item) => [item.product_key, item])
   );
+  const invalidProductKeys = uniqueKeys.filter((key) => !byProductKey.has(key));
+  const byFamily = new Map();
+  for (const key of uniqueKeys) {
+    const item = byProductKey.get(key);
+    if (item && !byFamily.has(item.family_key)) {
+      byFamily.set(item.family_key, item);
+    }
+  }
+  return { items: [...byFamily.values()], invalidProductKeys };
 }
 
 module.exports = {
   buildCatalogItems,
   displayNameFor,
+  familyDisplayNameFor,
   familyForName,
   normalizeTurkish,
   resolveProductIdentity,
+  selectFavoriteCatalogItems,
   slug,
 };

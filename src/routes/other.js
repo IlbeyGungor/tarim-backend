@@ -8,6 +8,10 @@ const { rateLimit } = require('express-rate-limit');
 const mailer = require('../services/mailer');
 const multer = require('multer');
 const { v2: cloudinary } = require('cloudinary');
+const {
+  buildCatalogItems,
+  selectFavoriteCatalogItems,
+} = require('../utils/productCatalog');
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -532,7 +536,7 @@ usersRouter.patch('/me', authMiddleware, async (req, res, next) => {
     params.push(req.user.id);
     const { rows } = await query(
       `UPDATE users SET ${sets.join(',')}, updated_at=NOW() WHERE id=$${params.length}
-       RETURNING id,name,phone,phone_verified,email,city,district,bio,tc_verified,cks_verified,is_verified,rating,total_trades,profile_image,created_at,is_admin,account_status,has_local_password,auth_providers,match_notifications_enabled,personalization_enabled`,
+       RETURNING id,name,phone,phone_verified,email,city,district,bio,tc_verified,cks_verified,is_verified,rating,total_trades,profile_image,created_at,is_admin,account_status,has_local_password,auth_providers,match_notifications_enabled,personalization_enabled,favorite_product_notifications_enabled`,
       params
     );
     res.json(rows[0]);
@@ -543,7 +547,8 @@ usersRouter.patch('/me', authMiddleware, async (req, res, next) => {
 usersRouter.patch('/me/preferences', authMiddleware, async (req, res, next) => {
   const hasMatch = typeof req.body.match_notifications_enabled === 'boolean';
   const hasPersonalization = typeof req.body.personalization_enabled === 'boolean';
-  if (!hasMatch && !hasPersonalization) {
+  const hasFavorites = typeof req.body.favorite_product_notifications_enabled === 'boolean';
+  if (!hasMatch && !hasPersonalization && !hasFavorites) {
     return res.status(400).json({ error: 'Güncellenecek tercih yok.' });
   }
   const client = await getClient();
@@ -553,11 +558,14 @@ usersRouter.patch('/me/preferences', authMiddleware, async (req, res, next) => {
       UPDATE users SET
         match_notifications_enabled=COALESCE($1,match_notifications_enabled),
         personalization_enabled=COALESCE($2,personalization_enabled),
+        favorite_product_notifications_enabled=COALESCE($3,favorite_product_notifications_enabled),
         updated_at=NOW()
-      WHERE id=$3
-      RETURNING match_notifications_enabled,personalization_enabled
+      WHERE id=$4
+      RETURNING match_notifications_enabled,personalization_enabled,
+                favorite_product_notifications_enabled
     `, [hasMatch ? req.body.match_notifications_enabled : null,
       hasPersonalization ? req.body.personalization_enabled : null,
+      hasFavorites ? req.body.favorite_product_notifications_enabled : null,
       req.user.id]);
     if (hasPersonalization && req.body.personalization_enabled === false) {
       await client.query('DELETE FROM product_interest_events WHERE user_id=$1', [req.user.id]);
@@ -567,6 +575,72 @@ usersRouter.patch('/me/preferences', authMiddleware, async (req, res, next) => {
     res.json(rows[0]);
   } catch (err) {
     await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+});
+
+// GET /api/users/me/favorite-products
+usersRouter.get('/me/favorite-products', authMiddleware, async (req, res, next) => {
+  try {
+    const { rows } = await query(`
+      SELECT product_family_key AS family_key,product_key,display_name,category
+      FROM user_favorite_products
+      WHERE user_id=$1
+      ORDER BY display_name
+    `, [req.user.id]);
+    res.json({ products: rows });
+  } catch (err) { next(err); }
+});
+
+// PUT /api/users/me/favorite-products — replaces the full selection atomically.
+usersRouter.put('/me/favorite-products', authMiddleware, async (req, res, next) => {
+  const requested = req.body.product_keys;
+  if (!Array.isArray(requested) || requested.some((key) => typeof key !== 'string')) {
+    return res.status(400).json({ error: 'product_keys bir metin listesi olmalıdır.' });
+  }
+
+  const productKeys = [...new Set(requested.map((key) => key.trim()).filter(Boolean))];
+  const client = await getClient();
+  try {
+    const { rows: sourceRows } = await client.query(`
+      SELECT DISTINCT product
+      FROM market_price_latest
+      WHERE scope='national' AND BTRIM(product)<>''
+    `);
+    const catalog = buildCatalogItems(sourceRows);
+    const selection = selectFavoriteCatalogItems(productKeys, catalog);
+    if (selection.invalidProductKeys.length) {
+      return res.status(400).json({
+        error: 'Katalogda bulunmayan ürün seçildi.',
+        invalid_product_keys: selection.invalidProductKeys,
+      });
+    }
+
+    await client.query('BEGIN');
+    await client.query('DELETE FROM user_favorite_products WHERE user_id=$1', [req.user.id]);
+    for (const item of selection.items) {
+      await client.query(`
+        INSERT INTO user_favorite_products
+          (user_id,product_family_key,product_key,display_name,category)
+        VALUES ($1,$2,$3,$4,$5)
+      `, [req.user.id, item.family_key, item.product_key,
+        item.family_display_name || item.display_name, item.category]);
+    }
+    await client.query('COMMIT');
+
+    const products = selection.items
+      .map((item) => ({
+        family_key: item.family_key,
+        product_key: item.product_key,
+        display_name: item.family_display_name || item.display_name,
+        category: item.category,
+      }))
+      .sort((a, b) => a.display_name.localeCompare(b.display_name, 'tr'));
+    res.json({ products });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
     next(err);
   } finally {
     client.release();

@@ -17,7 +17,8 @@ const USER_COLUMNS = `
   id,name,phone,phone_verified,email,city,district,bio,tc_verified,cks_verified,
   is_verified,rating,total_trades,profile_image,created_at,is_admin,account_status,
   has_local_password,auth_providers,token_version,firebase_uid,
-  match_notifications_enabled,personalization_enabled
+  match_notifications_enabled,personalization_enabled,
+  favorite_product_notifications_enabled
 `;
 const CHALLENGE_TTL_MINUTES = 10;
 const PHONE_PATTERN = /^\+[1-9]\d{7,14}$/;

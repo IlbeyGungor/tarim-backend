@@ -68,7 +68,7 @@ app.use(cors({
     }
     callback(null, isAllowedCorsOrigin(origin));
   },
-  methods: ['GET','POST','PATCH','DELETE','OPTIONS'],
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization','Cache-Control','Pragma'],
 }));
 app.use(express.json({ limit: '10mb' }));
