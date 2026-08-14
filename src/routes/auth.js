@@ -21,6 +21,7 @@ const USER_COLUMNS = `
   favorite_product_notifications_enabled
 `;
 const CHALLENGE_TTL_MINUTES = 10;
+const FIREBASE_PHONE_AUTH_MAX_AGE_SECONDS = 10 * 60;
 const PHONE_PATTERN = /^\+[1-9]\d{7,14}$/;
 
 const authLimiter = rateLimit({
@@ -42,6 +43,26 @@ function normalizePhone(value) {
 
 function hashChallengeToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function hasLegacyPhoneChallenge(bodyValue) {
+  return Boolean(bodyValue.challengeId && bodyValue.challengeToken);
+}
+
+function isRecentFirebasePhoneAuth(decoded, nowSeconds = Math.floor(Date.now() / 1000)) {
+  const authTime = Number(decoded.auth_time);
+  if (!Number.isFinite(authTime)) return false;
+  const ageSeconds = nowSeconds - authTime;
+  return ageSeconds >= -60 && ageSeconds <= FIREBASE_PHONE_AUTH_MAX_AGE_SECONDS;
+}
+
+function phoneAlreadyRegisteredError() {
+  const error = new Error(
+    'Bu telefon numarası mevcut bir hesaba bağlı. Bu numarayla giriş yapın.'
+  );
+  error.status = 409;
+  error.apiCode = 'PHONE_ALREADY_REGISTERED';
+  return error;
 }
 
 function signUserToken(user) {
@@ -174,8 +195,8 @@ router.post('/phone/register/start', authLimiter, [
 });
 
 router.post('/phone/register/complete', authLimiter, [
-  body('challengeId').isUUID(),
-  body('challengeToken').notEmpty(),
+  body('challengeId').optional({ checkFalsy: true }).isUUID(),
+  body('challengeToken').optional({ checkFalsy: true }).notEmpty(),
   body('idToken').notEmpty(),
   body('name').trim().notEmpty(),
   body('password').isLength({ min: 6 }),
@@ -185,26 +206,41 @@ router.post('/phone/register/complete', authLimiter, [
 
   let client;
   try {
+    const hasChallengeId = Boolean(req.body.challengeId);
+    const hasChallengeToken = Boolean(req.body.challengeToken);
+    if (hasChallengeId !== hasChallengeToken) {
+      return res.status(400).json({
+        error: 'Challenge ID ve token birlikte gönderilmelidir.',
+      });
+    }
+
     const decoded = await firebaseAuth().verifyIdToken(req.body.idToken, true);
     const phone = normalizePhone(decoded.phone_number);
     if (!phone) return res.status(403).json({ error: 'Firebase telefon doğrulaması bulunamadı.' });
+    const hasLegacyChallenge = hasLegacyPhoneChallenge(req.body);
+    if (!hasLegacyChallenge && !isRecentFirebasePhoneAuth(decoded)) {
+      return res.status(400).json({
+        error: 'Telefon doğrulamasının süresi dolmuş. Yeniden SMS doğrulaması yapın.',
+        code: 'PHONE_AUTH_TOO_OLD',
+      });
+    }
 
     client = await getClient();
     await client.query('BEGIN');
-    await lockChallenge(client, {
-      id: req.body.challengeId,
-      token: req.body.challengeToken,
-      purpose: 'phone_register',
-      phone,
-    });
+    if (hasLegacyChallenge) {
+      await lockChallenge(client, {
+        id: req.body.challengeId,
+        token: req.body.challengeToken,
+        purpose: 'phone_register',
+        phone,
+      });
+    }
     const duplicate = await client.query(
       'SELECT id FROM users WHERE phone=$1 OR firebase_uid=$2 LIMIT 1 FOR UPDATE',
       [phone, decoded.uid]
     );
     if (duplicate.rows.length) {
-      const error = new Error('Bu telefon numarası mevcut bir hesaba bağlı.');
-      error.status = 409;
-      throw error;
+      throw phoneAlreadyRegisteredError();
     }
 
     const passwordHash = await bcrypt.hash(req.body.password, 12);
@@ -215,13 +251,21 @@ router.post('/phone/register/complete', authLimiter, [
       ) VALUES ($1,$2,true,$3,$4,true,'["phone","phone_password"]'::jsonb)
       RETURNING ${USER_COLUMNS}
     `, [req.body.name.trim(), phone, passwordHash, decoded.uid]);
-    await client.query('UPDATE auth_challenges SET used_at=NOW() WHERE id=$1', [req.body.challengeId]);
+    if (hasLegacyChallenge) {
+      await client.query(
+        'UPDATE auth_challenges SET used_at=NOW() WHERE id=$1',
+        [req.body.challengeId]
+      );
+    }
     await client.query('COMMIT');
 
     const user = rows[0];
     res.status(201).json({ token: signUserToken(user), user: publicUser(user) });
   } catch (err) {
     if (client) await client.query('ROLLBACK');
+    if (err.code === '23505') {
+      return next(phoneAlreadyRegisteredError());
+    }
     if (err.code === 'INVALID_CHALLENGE' && err.challengeId) {
       await query(`
         UPDATE auth_challenges SET attempts=attempts+1
@@ -507,6 +551,9 @@ router.testHelpers = {
   normalizePhone,
   hashChallengeToken,
   mergeProviders,
+  hasLegacyPhoneChallenge,
+  isRecentFirebasePhoneAuth,
+  phoneAlreadyRegisteredError,
 };
 
 module.exports = router;
