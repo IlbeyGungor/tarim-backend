@@ -16,6 +16,7 @@ const errorHandler   = require('./middleware/errorHandler');
 const { scheduleReservedListingCleanup } = require('./jobs/cleanupReservedListings');
 const { scheduleListingMatchRetries } = require('./services/listingMatches');
 const { scheduleProductInterestPruning } = require('./services/productInterest');
+const { listingPageRouter, listingSitemap } = require('./routes/listingPages');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -88,6 +89,8 @@ app.use('/api/products', productRoutes);
 app.use('/api/interests', interestRoutes);
 app.use('/api/prices',   pricesRouter);
 app.use('/api/users',    usersRouter);
+app.use('/ilan',         listingPageRouter);
+app.get('/ilan-sitemap.xml', listingSitemap);
 
 // Health check
 app.get('/health', (req, res) => {
