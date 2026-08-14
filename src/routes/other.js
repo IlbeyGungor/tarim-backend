@@ -532,11 +532,45 @@ usersRouter.patch('/me', authMiddleware, async (req, res, next) => {
     params.push(req.user.id);
     const { rows } = await query(
       `UPDATE users SET ${sets.join(',')}, updated_at=NOW() WHERE id=$${params.length}
-       RETURNING id,name,phone,phone_verified,city,district,bio,tc_verified,cks_verified,is_verified,rating,total_trades,profile_image,created_at`,
+       RETURNING id,name,phone,phone_verified,email,city,district,bio,tc_verified,cks_verified,is_verified,rating,total_trades,profile_image,created_at,is_admin,account_status,has_local_password,auth_providers,match_notifications_enabled,personalization_enabled`,
       params
     );
     res.json(rows[0]);
   } catch (err) { next(err); }
+});
+
+// PATCH /api/users/me/preferences
+usersRouter.patch('/me/preferences', authMiddleware, async (req, res, next) => {
+  const hasMatch = typeof req.body.match_notifications_enabled === 'boolean';
+  const hasPersonalization = typeof req.body.personalization_enabled === 'boolean';
+  if (!hasMatch && !hasPersonalization) {
+    return res.status(400).json({ error: 'Güncellenecek tercih yok.' });
+  }
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(`
+      UPDATE users SET
+        match_notifications_enabled=COALESCE($1,match_notifications_enabled),
+        personalization_enabled=COALESCE($2,personalization_enabled),
+        updated_at=NOW()
+      WHERE id=$3
+      RETURNING match_notifications_enabled,personalization_enabled
+    `, [hasMatch ? req.body.match_notifications_enabled : null,
+      hasPersonalization ? req.body.personalization_enabled : null,
+      req.user.id]);
+    if (hasPersonalization && req.body.personalization_enabled === false) {
+      await client.query('DELETE FROM product_interest_events WHERE user_id=$1', [req.user.id]);
+      await client.query('DELETE FROM user_product_interests WHERE user_id=$1', [req.user.id]);
+    }
+    await client.query('COMMIT');
+    res.json(rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
 });
 
 // POST /api/users/me/phone-verification-attempts — SMS başlamadan önce aylık limit kontrolü

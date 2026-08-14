@@ -33,14 +33,14 @@ function notificationData(data) {
 }
 
 async function sendToUser(userId, { title, body, data = {} }) {
-  if (!initialized) return;
+  if (!initialized) return { sent: false, retryable: true, reason: 'firebase_not_initialized' };
 
   try {
     const { rows } = await query(
       'SELECT token FROM device_tokens WHERE user_id=$1',
       [userId]
     );
-    if (!rows.length) return;
+    if (!rows.length) return { sent: false, retryable: false, reason: 'no_device_token' };
 
     const tokens = rows.map(r => r.token);
 
@@ -91,8 +91,15 @@ async function sendToUser(userId, { title, body, data = {} }) {
         );
       }
     }
+    return {
+      sent: response.successCount > 0,
+      retryable: response.successCount === 0 && response.failureCount > 0,
+      successCount: response.successCount,
+      failureCount: response.failureCount,
+    };
   } catch (err) {
     console.error('Push notification error:', err.message);
+    return { sent: false, retryable: true, reason: err.message };
   }
 }
 
@@ -179,6 +186,17 @@ const notify = {
         ? `${reviewerName}, size ${rating}/5 puan verdi ve değerlendirme yazdı.`
         : `${reviewerName}, size ${rating}/5 puan verdi.`,
       data: { type: 'review_received', offer_id: String(offerId) },
+    });
+  },
+
+  async listingMatch({ recipientId, cropName, newListingType, listingId }) {
+    const isBuyerListing = newListingType === 'buy';
+    return sendToUser(recipientId, {
+      title: 'Yeni İlan Eşleşmesi',
+      body: isBuyerListing
+        ? `${cropName} arayan yeni bir ilan yayınlandı.`
+        : `${cropName} satan yeni bir ilan yayınlandı.`,
+      data: { type: 'listing_match', listing_id: String(listingId) },
     });
   },
 };

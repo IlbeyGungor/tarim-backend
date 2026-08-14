@@ -1,5 +1,6 @@
 require('dotenv').config();
 const { pool } = require('./index');
+const { resolveProductIdentity } = require('../utils/productCatalog');
 
 const migrate = async () => {
   const client = await pool.connect();
@@ -17,6 +18,7 @@ console.log('DB INFO:', dbInfo.rows[0]);
 
     // Enable UUID extension
     await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
+    await client.query('CREATE EXTENSION IF NOT EXISTS pg_trgm');
 
     // ── users ──────────────────────────────────────────────────
     await client.query(`
@@ -59,6 +61,8 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image TEXT`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS match_notifications_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS personalization_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
     await client.query(`ALTER TABLE users ALTER COLUMN phone DROP NOT NULL`);
     await client.query(`ALTER TABLE users ALTER COLUMN profile_image TYPE TEXT`);
     await client.query(`
@@ -152,6 +156,9 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS reserved_until TIMESTAMPTZ`);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS listing_type VARCHAR(10) NOT NULL DEFAULT 'sell'`);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS fulfilled_quantity NUMERIC(12,2) NOT NULL DEFAULT 0`);
+    await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS product_key VARCHAR(160)`);
+    await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS product_family_key VARCHAR(180)`);
+    await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS catalog_product_key VARCHAR(160)`);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS price_unit VARCHAR(20)`);
     await client.query(`UPDATE listings SET price_unit=unit WHERE price_unit IS NULL OR BTRIM(price_unit)=''`);
     await client.query(`ALTER TABLE listings ALTER COLUMN price_unit SET DEFAULT 'kg'`);
@@ -234,6 +241,26 @@ console.log('DB INFO:', dbInfo.rows[0]);
         WHERE o.listing_id=l.id AND o.status IN ('accepted','completed')
       ), 0)
     `);
+
+    const { rows: productsToBackfill } = await client.query(`
+      SELECT id,crop_name,category,catalog_product_key
+      FROM listings
+      WHERE product_key IS NULL OR product_family_key IS NULL
+    `);
+    for (const listing of productsToBackfill) {
+      const identity = resolveProductIdentity(
+        listing.crop_name,
+        listing.category,
+        listing.catalog_product_key
+      );
+      await client.query(`
+        UPDATE listings
+        SET product_key=$1, product_family_key=$2
+        WHERE id=$3
+      `, [identity.product_key, identity.product_family_key, listing.id]);
+    }
+    await client.query(`ALTER TABLE listings ALTER COLUMN product_key SET NOT NULL`);
+    await client.query(`ALTER TABLE listings ALTER COLUMN product_family_key SET NOT NULL`);
 
     // ── messages ───────────────────────────────────────────────
     await client.query(`
@@ -405,11 +432,167 @@ console.log('DB INFO:', dbInfo.rows[0]);
       )
     `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS product_interest_events (
+        id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        event_id            VARCHAR(160) NOT NULL,
+        user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        event_type          VARCHAR(40) NOT NULL,
+        product_key         VARCHAR(160) NOT NULL,
+        product_family_key  VARCHAR(180) NOT NULL,
+        product_name        VARCHAR(160) NOT NULL,
+        category            VARCHAR(40),
+        listing_type        VARCHAR(10) CHECK (listing_type IN ('sell','buy')),
+        listing_id          UUID REFERENCES listings(id) ON DELETE SET NULL,
+        active_seconds      INTEGER NOT NULL DEFAULT 0,
+        score               NUMERIC(12,4) NOT NULL,
+        session_id          VARCHAR(160),
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (user_id,event_id)
+      )
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS user_product_interests (
+        user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        product_family_key  VARCHAR(180) NOT NULL,
+        listing_type        VARCHAR(10) NOT NULL CHECK (listing_type IN ('sell','buy')),
+        product_name        VARCHAR(160) NOT NULL,
+        category            VARCHAR(40),
+        score               NUMERIC(14,4) NOT NULL DEFAULT 0,
+        event_count         INTEGER NOT NULL DEFAULT 0,
+        last_event_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (user_id,product_family_key,listing_type)
+      )
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS listing_match_outbox (
+        id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        new_listing_id      UUID NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+        matched_listing_id  UUID REFERENCES listings(id) ON DELETE SET NULL,
+        recipient_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        status              VARCHAR(20) NOT NULL DEFAULT 'pending'
+                            CHECK (status IN ('pending','sent','failed')),
+        attempts            INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_error          TEXT,
+        sent_at             TIMESTAMPTZ,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (new_listing_id,recipient_id)
+      )
+    `);
+    await client.query(`ALTER TABLE listing_match_outbox ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ`);
+    await client.query(`ALTER TABLE listing_match_outbox DROP CONSTRAINT IF EXISTS listing_match_outbox_status_check`);
+    await client.query(`
+      ALTER TABLE listing_match_outbox
+      ADD CONSTRAINT listing_match_outbox_status_check
+      CHECK (status IN ('pending','processing','sent','failed','permanent_failed'))
+    `);
+    await client.query(`
+      UPDATE listing_match_outbox
+      SET status='permanent_failed',claimed_at=NULL
+      WHERE status='failed' AND attempts>=3
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS listing_match_jobs (
+        listing_id       UUID PRIMARY KEY REFERENCES listings(id) ON DELETE CASCADE,
+        status           VARCHAR(20) NOT NULL DEFAULT 'pending'
+                         CHECK (status IN ('pending','processing','done','failed','permanent_failed')),
+        attempts         INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        claimed_at       TIMESTAMPTZ,
+        processed_at     TIMESTAMPTZ,
+        last_error       TEXT,
+        created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS listing_match_daily_counts (
+        recipient_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        notification_date  DATE NOT NULL,
+        notification_count INTEGER NOT NULL DEFAULT 0 CHECK (notification_count BETWEEN 0 AND 5),
+        updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (recipient_id,notification_date)
+      )
+    `);
+
+    const { rows: pistachioListings } = await client.query(`
+      SELECT id,crop_name,category,catalog_product_key,product_family_key
+      FROM listings
+      WHERE product_family_key IN ('fistik','antep-fistigi','yer-fistigi')
+         OR crop_name ILIKE '%fıst%'
+         OR crop_name ILIKE '%fist%'
+    `);
+    for (const listing of pistachioListings) {
+      const identity = resolveProductIdentity(
+        listing.crop_name,
+        listing.category,
+        listing.catalog_product_key
+      );
+      if (identity.product_family_key !== listing.product_family_key) {
+        await client.query(`
+          UPDATE listings SET product_family_key=$1 WHERE id=$2
+        `, [identity.product_family_key, listing.id]);
+      }
+    }
+
+    const { rows: pistachioEvents } = await client.query(`
+      SELECT id,product_name,category,product_family_key
+      FROM product_interest_events
+      WHERE product_family_key IN ('fistik','antep-fistigi','yer-fistigi')
+         OR product_name ILIKE '%fıst%'
+         OR product_name ILIKE '%fist%'
+    `);
+    for (const event of pistachioEvents) {
+      const identity = resolveProductIdentity(event.product_name, event.category);
+      if (identity.product_family_key !== event.product_family_key) {
+        await client.query(`
+          UPDATE product_interest_events
+          SET product_family_key=$1
+          WHERE id=$2
+        `, [identity.product_family_key, event.id]);
+      }
+    }
+    await client.query(`
+      DELETE FROM user_product_interests
+      WHERE product_family_key IN ('fistik','antep-fistigi','yer-fistigi')
+    `);
+    await client.query(`
+      INSERT INTO user_product_interests
+        (user_id,product_family_key,listing_type,product_name,category,score,event_count,last_event_at)
+      SELECT user_id,
+             product_family_key,
+             listing_type,
+             (ARRAY_AGG(product_name ORDER BY created_at DESC))[1],
+             (ARRAY_AGG(category ORDER BY created_at DESC))[1],
+             SUM(score * POWER(0.5,EXTRACT(EPOCH FROM (NOW()-created_at))/2592000.0)),
+             COUNT(*)::int,
+             MAX(created_at)
+      FROM product_interest_events
+      WHERE product_family_key IN ('fistik','antep-fistigi','yer-fistigi')
+      GROUP BY user_id,product_family_key,listing_type
+      ON CONFLICT (user_id,product_family_key,listing_type) DO UPDATE SET
+        product_name=EXCLUDED.product_name,
+        category=EXCLUDED.category,
+        score=EXCLUDED.score,
+        event_count=EXCLUDED.event_count,
+        last_event_at=EXCLUDED.last_event_at
+    `);
+
     // ── Indexes ────────────────────────────────────────────────
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_seller     ON listings(seller_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_city       ON listings(city)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_category   ON listings(category)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_status     ON listings(status)`);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_listings_active_family_type_created
+      ON listings(product_family_key,listing_type,created_at DESC)
+      WHERE status='active'
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_listings_product_name_trgm
+      ON listings USING GIN (crop_name gin_trgm_ops)
+      WHERE status='active'
+    `);
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_listings_seller_status_created
       ON listings(seller_id, status, created_at DESC)
@@ -442,6 +625,21 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_auth_challenges_phone_created ON auth_challenges(phone, created_at DESC)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires ON auth_challenges(expires_at) WHERE used_at IS NULL`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit_logs(created_at DESC)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_product_interest_events_user_created ON product_interest_events(user_id,created_at DESC)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_product_interest_events_created ON product_interest_events(created_at DESC)`);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_product_interest_events_session_dedupe
+      ON product_interest_events(user_id,event_type,session_id)
+      WHERE session_id IS NOT NULL
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_user_product_interests_rank ON user_product_interests(user_id,score DESC,last_event_at DESC)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_listing_match_outbox_retry ON listing_match_outbox(status,next_attempt_at) WHERE status IN ('pending','failed')`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_listing_match_outbox_recipient_created ON listing_match_outbox(recipient_id,created_at DESC)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_listing_match_outbox_terminal_cleanup ON listing_match_outbox(status,created_at) WHERE status IN ('sent','permanent_failed')`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_listing_match_outbox_processing_claimed ON listing_match_outbox(claimed_at) WHERE status='processing'`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_listing_match_jobs_retry ON listing_match_jobs(status,next_attempt_at) WHERE status IN ('pending','failed','processing')`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_listing_match_jobs_processing_claimed ON listing_match_jobs(claimed_at) WHERE status='processing'`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_listing_match_daily_counts_date ON listing_match_daily_counts(notification_date)`);
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_phone_verification_attempts_user_created
       ON phone_verification_attempts(user_id, created_at DESC)

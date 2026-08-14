@@ -5,6 +5,9 @@ const authMiddleware = require('../middleware/auth');
 const { rateLimit } = require('express-rate-limit');
 const mailer = require('../services/mailer');
 const notify = require('../utils/notify');
+const { resolveProductIdentity } = require('../utils/productCatalog');
+const { recordProductInterest } = require('../services/productInterest');
+const { queueListingMatches, runListingMatchWorkers } = require('../services/listingMatches');
 const {
   isListingUnit,
   areListingUnitsCompatible,
@@ -103,6 +106,78 @@ router.get('/', authMiddleware.optional, async (req, res, next) => {
       page: parseInt(page),
       totalPages: Math.ceil(countRows[0].count / limit),
     });
+  } catch (err) { next(err); }
+});
+
+// GET /api/listings/recommendations (authenticated)
+router.get('/recommendations', authMiddleware, async (req, res, next) => {
+  try {
+    const placement = req.query.placement === 'detail' ? 'detail' : 'home';
+    const contextId = String(req.query.context_listing_id || '').trim();
+    const { rows: preferenceRows } = await query(
+      'SELECT personalization_enabled FROM users WHERE id=$1',
+      [req.user.id]
+    );
+    if (!preferenceRows[0]?.personalization_enabled && placement === 'home') {
+      return res.json({ listings: [] });
+    }
+
+    let context = null;
+    if (placement === 'detail') {
+      if (!contextId) return res.status(400).json({ error: 'Bağlam ilanı zorunludur.' });
+      const result = await query('SELECT * FROM listings WHERE id=$1', [contextId]);
+      context = result.rows[0];
+      if (!context) return res.status(404).json({ error: 'İlan bulunamadı.' });
+    } else {
+      const eligibility = await query(`
+        SELECT EXISTS (
+          SELECT 1 FROM product_interest_events
+          WHERE user_id=$1
+            AND (event_type<>'listing_view' OR active_seconds>=10)
+        ) AS eligible
+      `, [req.user.id]);
+      if (!eligibility.rows[0]?.eligible) return res.json({ listings: [] });
+    }
+
+    const params = [req.user.id];
+    let scoreSql;
+    let extraWhere = '';
+    if (context) {
+      params.push(context.id, context.product_family_key, context.category, context.crop_name);
+      extraWhere = `AND l.id<>$2`;
+      scoreSql = `CASE
+        WHEN l.product_family_key=$3 THEN 100
+        WHEN l.category=$4 AND similarity(l.crop_name,$5)>=0.72
+          THEN 60 + similarity(l.crop_name,$5)*10
+        ELSE 0 END`;
+      extraWhere += ` AND (l.product_family_key=$3 OR (l.category=$4 AND similarity(l.crop_name,$5)>=0.72))`;
+    } else {
+      scoreSql = `COALESCE((
+        SELECT MAX(upi.score * POWER(0.5,EXTRACT(EPOCH FROM (NOW()-upi.last_event_at))/2592000.0)
+          * CASE WHEN upi.listing_type=l.listing_type THEN 1.2 ELSE 1 END)
+        FROM user_product_interests upi
+        WHERE upi.user_id=$1 AND upi.product_family_key=l.product_family_key
+      ),0)`;
+      extraWhere = `AND EXISTS (
+        SELECT 1 FROM user_product_interests upi
+        WHERE upi.user_id=$1 AND upi.product_family_key=l.product_family_key
+      )`;
+    }
+
+    const { rows } = await query(`
+      ${LISTING_SELECT}
+      WHERE l.status='active' AND u.account_status='active'
+        AND l.seller_id<>$1
+        ${extraWhere}
+        AND NOT EXISTS (
+          SELECT 1 FROM user_blocks ub
+          WHERE (ub.blocker_id=$1 AND ub.blocked_id=l.seller_id)
+             OR (ub.blocked_id=$1 AND ub.blocker_id=l.seller_id)
+        )
+      ORDER BY ${scoreSql} DESC,l.created_at DESC
+      LIMIT 6
+    `, params);
+    res.json({ listings: rows });
   } catch (err) { next(err); }
 });
 
@@ -209,11 +284,12 @@ router.post('/', authMiddleware, [
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
+  const client = await getClient();
   try {
     const {
       listing_type = 'sell', crop_name, category, quantity, unit = 'kg',
       price_per_unit, price_unit = unit, price_type = 'negotiate',
-      city, district, address, description, harvest_date
+      city, district, address, description, harvest_date, catalog_product_key
     } = req.body;
 
     if (!areListingUnitsCompatible(unit, price_unit)) {
@@ -223,17 +299,38 @@ router.post('/', authMiddleware, [
       ? null
       : Number(price_per_unit);
     const normalizedPriceType = normalizedPrice == null ? 'negotiate' : price_type;
+    const identity = resolveProductIdentity(crop_name, category, catalog_product_key);
 
-    const { rows } = await query(`
+    await client.query('BEGIN');
+    const { rows } = await client.query(`
       INSERT INTO listings
-        (seller_id,listing_type,crop_name,category,quantity,unit,price_per_unit,price_unit,price_type,city,district,address,description,harvest_date)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        (seller_id,listing_type,crop_name,category,quantity,unit,price_per_unit,price_unit,price_type,city,district,address,description,harvest_date,product_key,product_family_key,catalog_product_key)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
       RETURNING *
     `, [req.user.id, listing_type, crop_name, category, quantity, unit, normalizedPrice, price_unit, normalizedPriceType,
-        city||null, district||null, address||null, description||null, harvest_date||null]);
+        city||null, district||null, address||null, description||null, harvest_date||null,
+        identity.product_key, identity.product_family_key, catalog_product_key||null]);
+
+    await recordProductInterest({
+      client,
+      userId: req.user.id,
+      eventId: `listing-create:${rows[0].id}`,
+      eventType: 'listing_create',
+      listing: rows[0],
+    });
+    await queueListingMatches(client, rows[0]);
+    await client.query('COMMIT');
+    runListingMatchWorkers({ listingId: rows[0].id }).catch((err) =>
+      console.error('[notification] listing match dispatch failed:', err)
+    );
 
     res.status(201).json(rows[0]);
-  } catch (err) { next(err); }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    next(err);
+  } finally {
+    client.release();
+  }
 });
 
 // POST /api/listings/:id/close  (auth, owner only)
@@ -336,7 +433,18 @@ router.patch('/:id', authMiddleware, async (req, res, next) => {
       req.body.price_type = 'negotiate';
     }
 
-    const allowed = ['crop_name','quantity','unit','price_per_unit','price_unit','price_type','description','harvest_date'];
+    if (req.body.crop_name !== undefined) {
+      const identity = resolveProductIdentity(
+        req.body.crop_name,
+        existing[0].category,
+        req.body.catalog_product_key || null
+      );
+      req.body.product_key = identity.product_key;
+      req.body.product_family_key = identity.product_family_key;
+      req.body.catalog_product_key = req.body.catalog_product_key || null;
+    }
+
+    const allowed = ['crop_name','quantity','unit','price_per_unit','price_unit','price_type','description','harvest_date','product_key','product_family_key','catalog_product_key'];
     const sets = [], params = [];
     for (const key of allowed) {
       if (req.body[key] !== undefined) {

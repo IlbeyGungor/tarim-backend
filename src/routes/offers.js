@@ -4,6 +4,7 @@ const { body, validationResult } = require('express-validator');
 const { query, getClient } = require('../db');
 const authMiddleware = require('../middleware/auth');
 const notify = require('../utils/notify');
+const { recordProductInterest } = require('../services/productInterest');
 
 function sendNotification(type, promise) {
   promise.catch((err) => {
@@ -194,6 +195,9 @@ router.get('/chats', authMiddleware, async (req, res, next) => {
           'price_unit', l.price_unit,
           'price_per_unit', l.price_per_unit,
           'listing_type', l.listing_type,
+          'category', l.category,
+          'product_key', l.product_key,
+          'product_family_key', l.product_family_key,
           'quantity', l.quantity,
           'fulfilled_quantity', l.fulfilled_quantity,
           'remaining_quantity', GREATEST(l.quantity - l.fulfilled_quantity, 0),
@@ -358,7 +362,8 @@ router.get('/my', authMiddleware, async (req, res, next) => {
       SELECT o.*,
         json_build_object('id',l.id,'crop_name',l.crop_name,'city',l.city,
           'district',l.district,'unit',l.unit,'price_unit',l.price_unit,'price_per_unit',l.price_per_unit,
-          'listing_type',l.listing_type,'quantity',l.quantity,
+          'listing_type',l.listing_type,'category',l.category,
+          'product_key',l.product_key,'product_family_key',l.product_family_key,'quantity',l.quantity,
           'fulfilled_quantity',l.fulfilled_quantity,
           'remaining_quantity',GREATEST(l.quantity-l.fulfilled_quantity,0)) AS listing,
         json_build_object('id',u.id,'name',u.name,'phone',u.phone,'phone_verified',u.phone_verified) AS seller
@@ -385,7 +390,8 @@ router.get('/received', authMiddleware, async (req, res, next) => {
     const { rows } = await query(`
       SELECT o.*,
         json_build_object('id',l.id,'crop_name',l.crop_name,'city',l.city,'district',l.district,'unit',l.unit,'price_unit',l.price_unit,'price_per_unit',l.price_per_unit,
-          'listing_type',l.listing_type,'quantity',l.quantity,
+          'listing_type',l.listing_type,'category',l.category,
+          'product_key',l.product_key,'product_family_key',l.product_family_key,'quantity',l.quantity,
           'fulfilled_quantity',l.fulfilled_quantity,
           'remaining_quantity',GREATEST(l.quantity-l.fulfilled_quantity,0)) AS listing,
         json_build_object('id',u.id,'name',u.name,'phone',u.phone,'phone_verified',u.phone_verified,'rating',u.rating,'is_verified',u.is_verified) AS buyer
@@ -477,6 +483,14 @@ router.post('/', authMiddleware, [
     });
 
     await client.query('UPDATE listings SET offer_count=offer_count+1 WHERE id=$1', [listing_id]);
+
+    await recordProductInterest({
+      client,
+      userId: req.user.id,
+      eventId: `offer-create:${rows[0].id}`,
+      eventType: 'offer_create',
+      listing,
+    });
 
     const { rows: buyerRows } = await client.query('SELECT name FROM users WHERE id=$1', [req.user.id]);
 
@@ -998,6 +1012,7 @@ router.delete('/:id', authMiddleware, async (req, res, next) => {
 async function requireAcceptedChatParticipant(offerId, userId) {
   const { rows } = await query(`
     SELECT o.id, o.buyer_id, l.seller_id, o.listing_id,
+           l.crop_name,l.category,l.listing_type,l.product_key,l.product_family_key,l.catalog_product_key,
            buyer.name AS buyer_name, seller.name AS seller_name
     FROM offers o
     JOIN listings l ON l.id = o.listing_id
@@ -1076,6 +1091,13 @@ router.post('/:id/messages', authMiddleware, [
       'INSERT INTO messages (offer_id,sender_id,text) VALUES ($1,$2,$3) RETURNING *',
       [req.params.id, req.user.id, req.body.text]
     );
+    await recordProductInterest({
+      userId: req.user.id,
+      eventId: `message-sent:${rows[0].id}`,
+      eventType: 'message_sent',
+      listing: offer,
+      listingId: offer.listing_id,
+    });
     const clearColumn = offer.buyer_id === req.user.id ? 'seller_chat_deleted_at' : 'buyer_chat_deleted_at';
     await query(`UPDATE offers SET ${clearColumn}=NULL, updated_at=NOW() WHERE id=$1`, [req.params.id]);
     const isBuyer = offer.buyer_id === req.user.id;

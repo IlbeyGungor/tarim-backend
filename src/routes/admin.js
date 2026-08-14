@@ -125,6 +125,30 @@ router.get('/analytics', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+router.get('/analytics/products', async (req, res, next) => {
+  try {
+    const days = normalizeAnalyticsDays(req.query.days);
+    const { rows } = await query(`
+      SELECT product_family_key,
+             MAX(product_name) AS product_name,
+             MAX(category) AS category,
+             COUNT(*) FILTER (WHERE event_type='listing_view')::int AS views,
+             COALESCE(SUM(active_seconds) FILTER (WHERE event_type='listing_view'),0)::int AS active_seconds,
+             COUNT(*) FILTER (WHERE event_type='search')::int AS searches,
+             COUNT(*) FILTER (WHERE event_type='listing_create')::int AS listings,
+             COUNT(*) FILTER (WHERE event_type='call_button_click')::int AS calls,
+             COUNT(*) FILTER (WHERE event_type='offer_create')::int AS offers,
+             COUNT(*) FILTER (WHERE event_type='message_sent')::int AS messages
+      FROM product_interest_events
+      WHERE created_at >= NOW() - ($1::int * INTERVAL '1 day')
+      GROUP BY product_family_key
+      ORDER BY views DESC,offers DESC,searches DESC
+      LIMIT 100
+    `, [days]);
+    res.json({ days, products: rows });
+  } catch (err) { next(err); }
+});
+
 router.get('/listings', async (req, res, next) => {
   try {
     const { page, limit, offset } = paging(req);

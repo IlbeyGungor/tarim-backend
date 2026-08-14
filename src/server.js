@@ -9,9 +9,13 @@ const authRoutes     = require('./routes/auth');
 const listingRoutes  = require('./routes/listings');
 const offerRoutes    = require('./routes/offers');
 const adminRoutes    = require('./routes/admin');
+const productRoutes  = require('./routes/products');
+const interestRoutes = require('./routes/interests');
 const { pricesRouter, usersRouter } = require('./routes/other');
 const errorHandler   = require('./middleware/errorHandler');
 const { scheduleReservedListingCleanup } = require('./jobs/cleanupReservedListings');
+const { scheduleListingMatchRetries } = require('./services/listingMatches');
+const { scheduleProductInterestPruning } = require('./services/productInterest');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -80,6 +84,8 @@ app.use('/api/auth',     authRoutes);
 app.use('/api/listings', listingRoutes);
 app.use('/api/offers',   offerRoutes);
 app.use('/api/admin',    adminRoutes);
+app.use('/api/products', productRoutes);
+app.use('/api/interests', interestRoutes);
 app.use('/api/prices',   pricesRouter);
 app.use('/api/users',    usersRouter);
 
@@ -105,5 +111,7 @@ app.listen(PORT, () => {
 
 scheduleReservedListingCleanup();
 scheduleMarketPriceUpdate();
+scheduleListingMatchRetries();
+scheduleProductInterestPruning();
 
 module.exports = app;
