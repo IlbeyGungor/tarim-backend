@@ -127,7 +127,7 @@ function imageGallery(listing) {
 }
 
 function renderNotFound() {
-  return `<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>İlan bulunamadı | Tarım Pazar</title><link rel="icon" href="/assets/Icon-App-1024x1024@1x.png"><link rel="stylesheet" href="/assets/listing-pages.css"></head><body><header class="site-header"><div class="nav-shell"><a class="brand" href="/"><img src="/assets/web_site_logo.png" alt="Tarım Pazar" width="156"></a><a class="header-action" href="/indir/">Uygulamayı İndir</a></div></header><main class="card notice"><h1>İlan bulunamadı</h1><p>Bu ilan kapanmış, silinmiş veya artık yayında olmayabilir.</p><a class="primary-action" href="/">Aktif ilanlara dön</a></main></body></html>`;
+  return `<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>İlan bulunamadı | Tarım Pazar</title><link rel="icon" href="/assets/Icon-App-1024x1024@1x.png"><link rel="stylesheet" href="/assets/listing-pages.css"></head><body><header class="site-header"><div class="nav-shell"><a class="brand" href="/"><img src="/assets/web_site_logo.png" alt="Tarım Pazar" width="156"></a><a class="header-action" href="/indir/">Uygulamayı İndir</a></div></header><main class="card notice"><h1>İlan bulunamadı</h1><p>Bu ilan kapanmış, silinmiş veya artık yayında olmayabilir.</p><a class="primary-action" href="/ilanlar/">Aktif ilanlara dön</a></main></body></html>`;
 }
 
 function renderListing(listing) {
@@ -169,7 +169,7 @@ function renderListing(listing) {
         '@type': 'BreadcrumbList',
         itemListElement: [
           { '@type': 'ListItem', position: 1, name: 'Tarım Pazar', item: `${SITE_ORIGIN}/` },
-          { '@type': 'ListItem', position: 2, name: 'İlanlar', item: `${SITE_ORIGIN}/#ilanlar` },
+          { '@type': 'ListItem', position: 2, name: 'İlanlar', item: `${SITE_ORIGIN}/ilanlar/` },
           { '@type': 'ListItem', position: 3, name: listing.crop_name, item: canonicalUrl },
         ],
       },
@@ -190,7 +190,7 @@ function renderListing(listing) {
 </head>
 <body>
   <header class="site-header"><div class="nav-shell"><a class="brand" href="/" aria-label="Tarım Pazar ana sayfa"><img src="/assets/web_site_logo.png" alt="Tarım Pazar" width="156"></a><a class="header-action" href="/indir/">Uygulamayı İndir</a></div></header>
-  <nav class="breadcrumbs" aria-label="Sayfa yolu"><a href="/">Ana Sayfa</a><span>›</span><a href="/#ilanlar">İlanlar</a><span>›</span>${escapeHtml(listing.crop_name)}</nav>
+  <nav class="breadcrumbs" aria-label="Sayfa yolu"><a href="/">Ana Sayfa</a><span>›</span><a href="/ilanlar/">İlanlar</a><span>›</span>${escapeHtml(listing.crop_name)}</nav>
   <main class="listing-layout">
     <div class="listing-main">
       ${imageGallery(listing)}
