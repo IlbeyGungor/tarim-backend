@@ -16,7 +16,8 @@ const errorHandler   = require('./middleware/errorHandler');
 const { scheduleReservedListingCleanup } = require('./jobs/cleanupReservedListings');
 const { scheduleListingMatchRetries } = require('./services/listingMatches');
 const { scheduleProductInterestPruning } = require('./services/productInterest');
-const { listingPageRouter, listingSitemap } = require('./routes/listingPages');
+const { listingPageRouter, listingSitemap, withListingShareUrls } = require('./routes/listingPages');
+const { appleAppSiteAssociation, androidAssetLinks } = require('./routes/appAssociations');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -73,6 +74,15 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+app.get('/.well-known/apple-app-site-association', appleAppSiteAssociation);
+app.get('/.well-known/assetlinks.json', androidAssetLinks);
+
+app.use('/api', (req, res, next) => {
+  const sendJson = res.json.bind(res);
+  res.json = (body) => sendJson(withListingShareUrls(body));
+  next();
+});
 
 app.use('/api/listings', uploadRoutes);
 app.use('/api/tokens', tokenRoutes);

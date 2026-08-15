@@ -201,7 +201,8 @@ router.get('/chats', authMiddleware, async (req, res, next) => {
           'quantity', l.quantity,
           'fulfilled_quantity', l.fulfilled_quantity,
           'remaining_quantity', GREATEST(l.quantity - l.fulfilled_quantity, 0),
-          'status', l.status
+          'status', l.status,
+          'seller', json_build_object('id', seller.id, 'name', seller.name)
         ) AS listing,
         CASE
           WHEN o.buyer_id = $1 THEN json_build_object('id', seller.id, 'name', seller.name, 'phone', seller.phone, 'phone_verified', seller.phone_verified, 'rating', seller.rating, 'is_verified', seller.is_verified)
@@ -365,7 +366,8 @@ router.get('/my', authMiddleware, async (req, res, next) => {
           'listing_type',l.listing_type,'category',l.category,
           'product_key',l.product_key,'product_family_key',l.product_family_key,'quantity',l.quantity,
           'fulfilled_quantity',l.fulfilled_quantity,
-          'remaining_quantity',GREATEST(l.quantity-l.fulfilled_quantity,0)) AS listing,
+          'remaining_quantity',GREATEST(l.quantity-l.fulfilled_quantity,0),
+          'seller',json_build_object('id',u.id,'name',u.name)) AS listing,
         json_build_object('id',u.id,'name',u.name,'phone',u.phone,'phone_verified',u.phone_verified) AS seller
       FROM offers o
       JOIN listings l ON l.id = o.listing_id
@@ -393,11 +395,13 @@ router.get('/received', authMiddleware, async (req, res, next) => {
           'listing_type',l.listing_type,'category',l.category,
           'product_key',l.product_key,'product_family_key',l.product_family_key,'quantity',l.quantity,
           'fulfilled_quantity',l.fulfilled_quantity,
-          'remaining_quantity',GREATEST(l.quantity-l.fulfilled_quantity,0)) AS listing,
+          'remaining_quantity',GREATEST(l.quantity-l.fulfilled_quantity,0),
+          'seller',json_build_object('id',owner.id,'name',owner.name)) AS listing,
         json_build_object('id',u.id,'name',u.name,'phone',u.phone,'phone_verified',u.phone_verified,'rating',u.rating,'is_verified',u.is_verified) AS buyer
       FROM offers o
       JOIN listings l ON l.id = o.listing_id
       JOIN users u ON u.id = o.buyer_id
+      JOIN users owner ON owner.id = l.seller_id
       WHERE l.seller_id = $1 AND o.seller_deleted_at IS NULL
         AND NOT EXISTS (
           SELECT 1 FROM user_blocks ub

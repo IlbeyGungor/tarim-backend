@@ -37,6 +37,23 @@ function listingSlug(listing) {
 }
 
 function listingPath(listing) { return `/ilan/${listingSlug(listing)}/`; }
+function listingUrl(listing) { return `${SITE_ORIGIN}${listingPath(listing)}`; }
+
+function withListingShareUrls(value) {
+  if (Array.isArray(value)) return value.map(withListingShareUrls);
+  if (!value || typeof value !== 'object') return value;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return value;
+
+  const result = Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [key, withListingShareUrls(child)])
+  );
+  const sellerName = result.seller && result.seller.name;
+  if (result.id && result.crop_name && sellerName) {
+    result.share_url = listingUrl(result);
+  }
+  return result;
+}
 function extractListingId(slug) {
   const match = String(slug || '').match(UUID_AT_END);
   return match ? match[1].toLowerCase() : null;
@@ -235,5 +252,5 @@ async function listingSitemap(req, res, next) {
   } catch (error) { return next(error); }
 }
 
-router.helpers = { cloudinaryUrl, escapeHtml, extractListingId, listingPath, listingSlug, renderListing, slugify };
-module.exports = { listingPageRouter: router, listingSitemap };
+router.helpers = { cloudinaryUrl, escapeHtml, extractListingId, listingPath, listingSlug, listingUrl, renderListing, slugify, withListingShareUrls };
+module.exports = { listingPageRouter: router, listingSitemap, listingUrl, withListingShareUrls };

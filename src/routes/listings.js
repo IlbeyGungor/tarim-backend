@@ -35,6 +35,11 @@ const LISTING_SELECT = `
   JOIN users u ON u.id = l.seller_id
 `;
 
+async function fetchFullListing(id) {
+  const { rows } = await query(`${LISTING_SELECT} WHERE l.id=$1`, [id]);
+  return rows[0] || null;
+}
+
 const reportLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
@@ -324,7 +329,7 @@ router.post('/', authMiddleware, [
       console.error('[notification] listing match dispatch failed:', err)
     );
 
-    res.status(201).json(rows[0]);
+    res.status(201).json((await fetchFullListing(rows[0].id)) || rows[0]);
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     next(err);
@@ -385,7 +390,7 @@ router.post('/:id/close', authMiddleware, async (req, res, next) => {
         reason: 'listing_closed',
       }));
     });
-    res.json(rows[0]);
+    res.json((await fetchFullListing(rows[0].id)) || rows[0]);
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);
@@ -458,7 +463,7 @@ router.patch('/:id', authMiddleware, async (req, res, next) => {
       `UPDATE listings SET ${sets.join(',')}, updated_at=NOW() WHERE id=$${params.length} RETURNING *`,
       params
     );
-    res.json(rows[0]);
+    res.json((await fetchFullListing(rows[0].id)) || rows[0]);
   } catch (err) { next(err); }
 });
 
