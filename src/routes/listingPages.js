@@ -2,6 +2,8 @@ const router = require('express').Router();
 const { query } = require('../db');
 
 const SITE_ORIGIN = 'https://www.tarim-pazar.com';
+const DEFAULT_PRODUCT_IMAGE_BASE =
+  'https://res.cloudinary.com/dcqdlktnl/image/upload/f_auto,q_auto,c_limit,w_1200';
 const UUID_AT_END = /([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
 
 const PUBLIC_LISTING_SELECT = `
@@ -39,6 +41,25 @@ function listingSlug(listing) {
 function listingPath(listing) { return `/ilan/${listingSlug(listing)}/`; }
 function listingUrl(listing) { return `${SITE_ORIGIN}${listingPath(listing)}`; }
 
+function defaultProductImageId(value) {
+  return String(value || '')
+    .replace(/[çÇ]/g, 'c')
+    .replace(/[ğĞ]/g, 'g')
+    .replace(/[ıİ]/g, 'i')
+    .replace(/[öÖ]/g, 'o')
+    .replace(/[şŞ]/g, 's')
+    .replace(/[üÜ]/g, 'u')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 100);
+}
+
+function defaultProductImageUrl(value) {
+  const publicId = defaultProductImageId(value);
+  return publicId ? `${DEFAULT_PRODUCT_IMAGE_BASE}/${publicId}.jpg` : null;
+}
+
 function withListingShareUrls(value) {
   if (Array.isArray(value)) return value.map(withListingShareUrls);
   if (!value || typeof value !== 'object') return value;
@@ -51,6 +72,15 @@ function withListingShareUrls(value) {
   const sellerName = result.seller && result.seller.name;
   if (result.id && result.crop_name && sellerName) {
     result.share_url = listingUrl(result);
+  }
+  if (
+    result.id &&
+    result.crop_name &&
+    Object.prototype.hasOwnProperty.call(result, 'image_urls') &&
+    Array.isArray(result.image_urls) &&
+    result.image_urls.length === 0
+  ) {
+    result.default_image_url = defaultProductImageUrl(result.crop_name);
   }
   return result;
 }
@@ -252,5 +282,5 @@ async function listingSitemap(req, res, next) {
   } catch (error) { return next(error); }
 }
 
-router.helpers = { cloudinaryUrl, escapeHtml, extractListingId, listingPath, listingSlug, listingUrl, renderListing, slugify, withListingShareUrls };
-module.exports = { listingPageRouter: router, listingSitemap, listingUrl, withListingShareUrls };
+router.helpers = { cloudinaryUrl, defaultProductImageId, defaultProductImageUrl, escapeHtml, extractListingId, listingPath, listingSlug, listingUrl, renderListing, slugify, withListingShareUrls };
+module.exports = { defaultProductImageId, defaultProductImageUrl, listingPageRouter: router, listingSitemap, listingUrl, withListingShareUrls };

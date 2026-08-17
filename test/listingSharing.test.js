@@ -1,7 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { listingUrl, withListingShareUrls } = require('../src/routes/listingPages');
+const {
+  defaultProductImageId,
+  defaultProductImageUrl,
+  listingUrl,
+  withListingShareUrls,
+} = require('../src/routes/listingPages');
 const {
   ANDROID_CERTIFICATES,
   ANDROID_PACKAGE,
@@ -17,6 +22,7 @@ const listing = {
   crop_name: 'Çengelköy Salatalığı',
   city: 'Sakarya',
   district: 'Geyve',
+  image_urls: [],
   seller: { id: 'seller-1', name: 'Tuncay Şorguç' },
 };
 
@@ -35,8 +41,33 @@ test('withListingShareUrls enriches direct and embedded listings', () => {
   });
   assert.equal(result.listings[0].share_url, listingUrl(listing));
   assert.equal(result.offer.listing.share_url, listingUrl(listing));
+  assert.equal(
+    result.offer.listing.default_image_url,
+    'https://res.cloudinary.com/dcqdlktnl/image/upload/f_auto,q_auto,c_limit,w_1200/cengelkoy_salataligi.jpg'
+  );
   assert.equal(result.listings[0].created_at, createdAt);
   assert.equal(listing.share_url, undefined);
+});
+
+test('default product image ids follow the Cloudinary naming convention', () => {
+  assert.equal(defaultProductImageId('Domates Salçalık'), 'domates_salcalik');
+  assert.equal(defaultProductImageId('Çilek'), 'cilek');
+  assert.equal(defaultProductImageId('İç Badem'), 'ic_badem');
+  assert.equal(defaultProductImageId('  Erik / Siyah (İri)  '), 'erik_siyah_iri');
+  assert.equal(defaultProductImageId('Ç'.repeat(120)), 'c'.repeat(100));
+});
+
+test('real listing photos take priority over the shared default image', () => {
+  const result = withListingShareUrls({
+    ...listing,
+    image_urls: ['https://example.com/listing-photo.jpg'],
+  });
+  assert.equal(result.default_image_url, undefined);
+  assert.deepEqual(result.image_urls, ['https://example.com/listing-photo.jpg']);
+  assert.equal(
+    defaultProductImageUrl('Limon'),
+    'https://res.cloudinary.com/dcqdlktnl/image/upload/f_auto,q_auto,c_limit,w_1200/limon.jpg'
+  );
 });
 
 test('association documents contain the production app identities', () => {
