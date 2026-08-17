@@ -77,6 +77,19 @@ test('match expansion combines opposite listings and favorite subscribers', asyn
   );
   const expansion = statements.find((sql) => /raw_candidates/.test(sql));
   assert.ok(expansion);
+  assert.match(expansion, /WITH opposite_candidates AS/);
+  assert.match(
+    expansion,
+    /opposite_candidates AS[\s\S]*ORDER BY l\.seller_id,l\.created_at DESC[\s\S]*raw_candidates AS/
+  );
+  assert.match(
+    expansion,
+    /FROM opposite_candidates oc\s+UNION ALL\s+SELECT fp\.user_id/
+  );
+  assert.doesNotMatch(
+    expansion,
+    /ORDER BY l\.seller_id,l\.created_at DESC\s+UNION ALL/
+  );
   assert.match(expansion, /user_favorite_products/);
   assert.match(expansion, /favorite_product_notifications_enabled/);
   assert.match(expansion, /favorite_product/);

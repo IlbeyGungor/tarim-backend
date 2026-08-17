@@ -72,11 +72,10 @@ async function expandListingMatchJob(job, { getClientFn = getClient, queryFn = q
     if (listing) {
       const oppositeType = listing.listing_type === 'buy' ? 'sell' : 'buy';
       await client.query(`
-        WITH raw_candidates AS (
+        WITH opposite_candidates AS (
           SELECT DISTINCT ON (l.seller_id)
             l.seller_id AS recipient_id,
-            l.id AS matched_listing_id,
-            false AS favorite_match
+            l.id AS matched_listing_id
           FROM listings l
           JOIN users u ON u.id=l.seller_id
           WHERE l.status='active'
@@ -86,6 +85,11 @@ async function expandListingMatchJob(job, { getClientFn = getClient, queryFn = q
             AND u.account_status='active'
             AND u.match_notifications_enabled=true
           ORDER BY l.seller_id,l.created_at DESC
+        ), raw_candidates AS (
+          SELECT oc.recipient_id,
+                 oc.matched_listing_id,
+                 false AS favorite_match
+          FROM opposite_candidates oc
           UNION ALL
           SELECT fp.user_id AS recipient_id,
                  NULL::uuid AS matched_listing_id,
@@ -159,7 +163,10 @@ async function processListingMatchJobs(options = {}) {
     try {
       await expandListingMatchJob(job);
     } catch (error) {
-      console.error('[notification] listing match expansion failed:', error);
+      console.error(
+        `[notification] listing match failed listing_id=${job.listing_id} stage=expand_candidates:`,
+        error
+      );
     }
   }
   return jobs.length;
