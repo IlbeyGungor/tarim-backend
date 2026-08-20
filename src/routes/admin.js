@@ -43,6 +43,7 @@ router.get('/users', async (req, res, next) => {
     const where = [];
     const search = String(req.query.search || '').trim();
     const status = String(req.query.status || '').trim();
+    const verificationProvider = String(req.query.verification_provider || '').trim();
     if (search) {
       params.push(`%${search}%`);
       where.push(`(u.name ILIKE $${params.length} OR u.email ILIKE $${params.length} OR u.phone ILIKE $${params.length})`);
@@ -54,6 +55,13 @@ router.get('/users', async (req, res, next) => {
       params.push(status);
       where.push(`u.account_status=$${params.length}`);
     }
+    if (verificationProvider) {
+      if (!['firebase', 'whatsapp', 'legacy'].includes(verificationProvider)) {
+        return res.status(400).json({ error: 'Geçersiz doğrulama kaynağı.' });
+      }
+      params.push(verificationProvider);
+      where.push(`u.phone_verification_provider=$${params.length}`);
+    }
     const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const countParams = [...params];
     params.push(limit, offset);
@@ -61,7 +69,7 @@ router.get('/users', async (req, res, next) => {
       query(`
         SELECT u.id,u.name,u.email,u.phone,u.phone_verified,u.profile_image,u.city,u.district,
                u.is_admin,u.account_status,u.auth_providers,u.has_local_password,u.created_at,
-               u.last_active_at,
+               u.last_active_at,u.phone_verification_provider,u.phone_verified_at,
                (SELECT COUNT(*)::int FROM listings l WHERE l.seller_id=u.id) AS listing_count,
                (SELECT COUNT(*)::int FROM offers o WHERE o.buyer_id=u.id) AS offer_count
         FROM users u ${clause}

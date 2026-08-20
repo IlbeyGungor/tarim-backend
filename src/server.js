@@ -11,6 +11,7 @@ const offerRoutes    = require('./routes/offers');
 const adminRoutes    = require('./routes/admin');
 const productRoutes  = require('./routes/products');
 const interestRoutes = require('./routes/interests');
+const whatsappWebhookRoutes = require('./routes/whatsappWebhook');
 const { pricesRouter, usersRouter } = require('./routes/other');
 const errorHandler   = require('./middleware/errorHandler');
 const { scheduleReservedListingCleanup } = require('./jobs/cleanupReservedListings');
@@ -21,6 +22,10 @@ const { appleAppSiteAssociation, androidAssetLinks } = require('./routes/appAsso
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
+
+// Caddy is the single public proxy in production. This keeps IP-based rate
+// limits per client instead of grouping every request under the proxy IP.
+app.set('trust proxy', 1);
 
 const uploadRoutes = require('./routes/upload');
 const tokenRoutes = require('./routes/tokens');
@@ -72,8 +77,17 @@ app.use(cors({
   methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization','Cache-Control','Pragma'],
 }));
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({
+  limit: '10mb',
+  verify(req, _res, buffer) {
+    if (req.originalUrl.startsWith('/webhooks/whatsapp')) {
+      req.rawBody = Buffer.from(buffer);
+    }
+  },
+}));
 app.use(express.urlencoded({ extended: true }));
+
+app.use('/webhooks/whatsapp', whatsappWebhookRoutes);
 
 app.get('/.well-known/apple-app-site-association', appleAppSiteAssociation);
 app.get('/.well-known/assetlinks.json', androidAssetLinks);

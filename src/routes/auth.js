@@ -12,6 +12,13 @@ const {
   sendFirebasePasswordResetEmail,
 } = require('../services/firebasePasswordReset');
 const { recordUserActivity } = require('../services/userActivity');
+const {
+  ensureRegistrationFirebaseUser,
+  markWhatsAppChallengeUsed,
+  startWhatsAppChallenge,
+  verifyWhatsAppChallenge,
+  whatsappConfig,
+} = require('../services/whatsappPhoneAuth');
 
 const USER_COLUMNS = `
   id,name,phone,phone_verified,email,city,district,bio,tc_verified,cks_verified,
@@ -30,6 +37,14 @@ const authLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Çok fazla deneme yapıldı. Lütfen daha sonra tekrar deneyin.' },
+});
+
+const whatsappStartLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Çok fazla WhatsApp doğrulama isteği yapıldı. Lütfen daha sonra tekrar deneyin.' },
 });
 
 function normalizeEmail(value) {
@@ -177,6 +192,11 @@ router.post('/register', (_req, res) => {
   });
 });
 
+router.get('/phone/channels', (_req, res) => {
+  const config = whatsappConfig();
+  res.json({ firebase: true, whatsapp: config.available });
+});
+
 router.post('/phone/register/start', authLimiter, [
   body('phone').trim().notEmpty(),
 ], async (req, res, next) => {
@@ -247,8 +267,8 @@ router.post('/phone/register/complete', authLimiter, [
     const { rows } = await client.query(`
       INSERT INTO users (
         name,phone,phone_verified,password_hash,firebase_uid,
-        has_local_password,auth_providers
-      ) VALUES ($1,$2,true,$3,$4,true,'["phone","phone_password"]'::jsonb)
+        has_local_password,auth_providers,phone_verification_provider,phone_verified_at
+      ) VALUES ($1,$2,true,$3,$4,true,'["phone","phone_password"]'::jsonb,'firebase',NOW())
       RETURNING ${USER_COLUMNS}
     `, [req.body.name.trim(), phone, passwordHash, decoded.uid]);
     if (hasLegacyChallenge) {
@@ -273,6 +293,87 @@ router.post('/phone/register/complete', authLimiter, [
       `, [err.challengeId]);
     }
     next(err);
+  } finally {
+    client?.release();
+  }
+});
+
+router.post('/phone/register/whatsapp/start', whatsappStartLimiter, [
+  body('phone').trim().notEmpty(),
+], async (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+  try {
+    const challenge = await startWhatsAppChallenge({
+      purpose: 'phone_register',
+      phone: req.body.phone,
+    });
+    res.json(challenge);
+  } catch (error) { next(error); }
+});
+
+router.post('/phone/register/whatsapp/complete', authLimiter, [
+  body('challengeId').isUUID(),
+  body('challengeToken').notEmpty(),
+  body('code').matches(/^\d{6}$/),
+  body('name').trim().notEmpty(),
+  body('password').isLength({ min: 6 }),
+], async (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  let client;
+  try {
+    const challenge = await verifyWhatsAppChallenge({
+      challengeId: req.body.challengeId,
+      challengeToken: req.body.challengeToken,
+      code: req.body.code,
+      purpose: 'phone_register',
+    });
+    const existing = await query(
+      'SELECT id FROM users WHERE phone=$1 LIMIT 1',
+      [challenge.phone],
+    );
+    if (existing.rows.length) throw phoneAlreadyRegisteredError();
+
+    const firebaseUser = await ensureRegistrationFirebaseUser({
+      phone: challenge.phone,
+      name: req.body.name.trim(),
+      challengeId: challenge.id,
+    });
+    const firebaseCustomToken = await firebaseAuth().createCustomToken(firebaseUser.uid);
+
+    client = await getClient();
+    await client.query('BEGIN');
+    const duplicate = await client.query(
+      'SELECT id FROM users WHERE phone=$1 OR firebase_uid=$2 LIMIT 1 FOR UPDATE',
+      [challenge.phone, firebaseUser.uid],
+    );
+    if (duplicate.rows.length) throw phoneAlreadyRegisteredError();
+    const passwordHash = await bcrypt.hash(req.body.password, 12);
+    const inserted = await client.query(`
+      INSERT INTO users (
+        name,phone,phone_verified,password_hash,firebase_uid,
+        has_local_password,auth_providers,phone_verification_provider,phone_verified_at
+      ) VALUES (
+        $1,$2,true,$3,$4,true,
+        '["phone","phone_password","whatsapp_verification"]'::jsonb,
+        'whatsapp',NOW()
+      ) RETURNING ${USER_COLUMNS}
+    `, [req.body.name.trim(), challenge.phone, passwordHash, firebaseUser.uid]);
+    await markWhatsAppChallengeUsed(client, challenge.id);
+    await client.query('COMMIT');
+
+    const user = inserted.rows[0];
+    res.status(201).json({
+      token: signUserToken(user),
+      firebaseCustomToken,
+      user: publicUser(user),
+    });
+  } catch (error) {
+    if (client) await client.query('ROLLBACK');
+    if (error.code === '23505') return next(phoneAlreadyRegisteredError());
+    next(error);
   } finally {
     client?.release();
   }

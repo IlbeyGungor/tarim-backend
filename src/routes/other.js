@@ -5,6 +5,7 @@ const { query, getClient } = require('../db');
 const authMiddleware = require('../middleware/auth');
 const adminMiddleware = require('../middleware/admin');
 const { rateLimit } = require('express-rate-limit');
+const { validate: validateUuid } = require('uuid');
 const mailer = require('../services/mailer');
 const multer = require('multer');
 const { v2: cloudinary } = require('cloudinary');
@@ -12,6 +13,13 @@ const {
   buildCatalogItems,
   selectFavoriteCatalogItems,
 } = require('../utils/productCatalog');
+const {
+  ensureProfileFirebaseUser,
+  markWhatsAppChallengeUsed,
+  startWhatsAppChallenge,
+  verifyWhatsAppChallenge,
+} = require('../services/whatsappPhoneAuth');
+const { firebaseAuth } = require('../services/firebaseAdmin');
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -328,6 +336,14 @@ const userReportLimiter = rateLimit({
     ok: false,
     error: 'Çok fazla bildirim denemesi yapıldı. Lütfen daha sonra tekrar deneyin.',
   },
+});
+
+const whatsappProfileStartLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Çok fazla WhatsApp doğrulama isteği yapıldı. Lütfen daha sonra tekrar deneyin.' },
 });
 
 // POST /api/users/:id/block  (auth required)
@@ -706,7 +722,8 @@ usersRouter.patch('/me/phone', authMiddleware, async (req, res, next) => {
 
     const { rows } = await query(`
       UPDATE users
-      SET phone=$1, phone_verified=true, firebase_uid=COALESCE(firebase_uid, $2), updated_at=NOW()
+      SET phone=$1, phone_verified=true, firebase_uid=COALESCE(firebase_uid, $2),
+          phone_verification_provider='firebase',phone_verified_at=NOW(),updated_at=NOW()
       WHERE id=$3
       RETURNING id,name,phone,phone_verified,city,district,bio,tc_verified,cks_verified,
                 is_verified,rating,total_trades,profile_image,created_at
@@ -717,6 +734,91 @@ usersRouter.patch('/me/phone', authMiddleware, async (req, res, next) => {
       return res.status(409).json({ error: 'Bu telefon numarası başka bir hesapta kayıtlı.' });
     }
     next(err);
+  }
+});
+
+usersRouter.post(
+  '/me/phone/whatsapp/start',
+  authMiddleware,
+  whatsappProfileStartLimiter,
+  async (req, res, next) => {
+    try {
+      const challenge = await startWhatsAppChallenge({
+        purpose: 'profile_phone',
+        phone: req.body.phone,
+        userId: req.user.id,
+      });
+      res.json(challenge);
+    } catch (error) { next(error); }
+  },
+);
+
+usersRouter.post('/me/phone/whatsapp/complete', authMiddleware, async (req, res, next) => {
+  let client;
+  try {
+    const challengeId = String(req.body.challengeId || '');
+    const challengeToken = String(req.body.challengeToken || '');
+    const code = String(req.body.code || '').trim();
+    if (!validateUuid(challengeId) || !challengeToken || !/^\d{6}$/.test(code)) {
+      return res.status(400).json({ error: 'Geçerli challenge ve 6 haneli kod zorunludur.' });
+    }
+    const challenge = await verifyWhatsAppChallenge({
+      challengeId,
+      challengeToken,
+      code,
+      purpose: 'profile_phone',
+      userId: req.user.id,
+    });
+    const currentResult = await query(`
+      SELECT id,name,firebase_uid FROM users WHERE id=$1 LIMIT 1
+    `, [req.user.id]);
+    const current = currentResult.rows[0];
+    if (!current) return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
+    const duplicate = await query(`
+      SELECT id FROM users WHERE phone=$1 AND id<>$2 LIMIT 1
+    `, [challenge.phone, req.user.id]);
+    if (duplicate.rows.length) {
+      return res.status(409).json({
+        error: 'Bu telefon numarası başka bir hesapta kayıtlı.',
+        code: 'PHONE_ALREADY_REGISTERED',
+      });
+    }
+
+    const firebaseUser = await ensureProfileFirebaseUser({
+      phone: challenge.phone,
+      name: current.name,
+      userId: current.id,
+      currentFirebaseUid: current.firebase_uid,
+    });
+    const firebaseCustomToken = await firebaseAuth().createCustomToken(firebaseUser.uid);
+
+    client = await getClient();
+    await client.query('BEGIN');
+    const updated = await client.query(`
+      UPDATE users
+      SET phone=$1,phone_verified=true,firebase_uid=$2,
+          phone_verification_provider='whatsapp',phone_verified_at=NOW(),updated_at=NOW()
+      WHERE id=$3
+      RETURNING id,name,phone,phone_verified,email,city,district,bio,tc_verified,
+                cks_verified,is_verified,rating,total_trades,profile_image,created_at,
+                is_admin,account_status,has_local_password,auth_providers,
+                match_notifications_enabled,personalization_enabled,
+                favorite_product_notifications_enabled
+    `, [challenge.phone, firebaseUser.uid, req.user.id]);
+    await markWhatsAppChallengeUsed(client, challenge.id);
+    await client.query('COMMIT');
+    res.json({ user: updated.rows[0], firebaseCustomToken });
+  } catch (error) {
+    if (client) await client.query('ROLLBACK');
+    if (error.code === '23505') {
+      return res.status(409).json({
+        error: 'Bu telefon numarası başka bir hesapta kayıtlı.',
+        code: 'PHONE_ALREADY_REGISTERED',
+      });
+    }
+    next(error);
+  } finally {
+    client?.release();
   }
 });
 

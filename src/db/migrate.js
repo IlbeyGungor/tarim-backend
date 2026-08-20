@@ -64,8 +64,29 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS match_notifications_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS personalization_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS favorite_product_notifications_enabled BOOLEAN NOT NULL DEFAULT TRUE`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_verification_provider VARCHAR(20)`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_verified_at TIMESTAMPTZ`);
     await client.query(`ALTER TABLE users ALTER COLUMN phone DROP NOT NULL`);
     await client.query(`ALTER TABLE users ALTER COLUMN profile_image TYPE TEXT`);
+    await client.query(`
+      UPDATE users
+      SET phone_verification_provider='legacy',
+          phone_verified_at=COALESCE(phone_verified_at, updated_at, created_at)
+      WHERE phone_verified=true AND phone_verification_provider IS NULL
+    `);
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname='users_phone_verification_provider_check'
+            AND conrelid='users'::regclass
+        ) THEN
+          ALTER TABLE users ADD CONSTRAINT users_phone_verification_provider_check
+          CHECK (phone_verification_provider IS NULL OR phone_verification_provider IN ('firebase','whatsapp','legacy'));
+        END IF;
+      END $$;
+    `);
     await client.query(`
       UPDATE users
       SET has_local_password = true,
@@ -407,6 +428,35 @@ console.log('DB INFO:', dbInfo.rows[0]);
         used_at     TIMESTAMPTZ,
         created_at  TIMESTAMPTZ DEFAULT NOW()
       )
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS whatsapp_phone_challenges (
+        id                    UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        purpose               VARCHAR(30) NOT NULL CHECK (purpose IN ('phone_register','profile_phone')),
+        phone                 VARCHAR(32) NOT NULL,
+        user_id               UUID REFERENCES users(id) ON DELETE CASCADE,
+        client_token_hash     VARCHAR(64) NOT NULL,
+        code_hash             VARCHAR(64) NOT NULL,
+        attempts              INTEGER NOT NULL DEFAULT 0,
+        delivery_status       VARCHAR(24) NOT NULL DEFAULT 'pending',
+        provider_message_id   TEXT,
+        provider_error        TEXT,
+        expires_at            TIMESTAMPTZ NOT NULL,
+        verified_at           TIMESTAMPTZ,
+        used_at               TIMESTAMPTZ,
+        created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_whatsapp_phone_challenges_phone_created
+      ON whatsapp_phone_challenges(phone,purpose,created_at DESC)
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_whatsapp_phone_challenges_message
+      ON whatsapp_phone_challenges(provider_message_id)
+      WHERE provider_message_id IS NOT NULL
     `);
 
     await client.query(`
