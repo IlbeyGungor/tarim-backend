@@ -128,7 +128,8 @@ console.log('DB INFO:', dbInfo.rows[0]);
         reserved_until  TIMESTAMPTZ,
         created_at      TIMESTAMPTZ DEFAULT NOW(),
         updated_at      TIMESTAMPTZ DEFAULT NOW(),
-        image_urls      JSONB NOT NULL DEFAULT '[]'::jsonb
+        image_urls      JSONB NOT NULL DEFAULT '[]'::jsonb,
+        match_revision  INTEGER NOT NULL DEFAULT 1
       )
     `);
 
@@ -164,6 +165,7 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS product_key VARCHAR(160)`);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS product_family_key VARCHAR(180)`);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS catalog_product_key VARCHAR(160)`);
+    await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS match_revision INTEGER NOT NULL DEFAULT 1`);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS price_unit VARCHAR(20)`);
     await client.query(`UPDATE listings SET price_unit=unit WHERE price_unit IS NULL OR BTRIM(price_unit)=''`);
     await client.query(`ALTER TABLE listings ALTER COLUMN price_unit SET DEFAULT 'kg'`);
@@ -566,6 +568,7 @@ console.log('DB INFO:', dbInfo.rows[0]);
         new_listing_id      UUID NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
         matched_listing_id  UUID REFERENCES listings(id) ON DELETE SET NULL,
         recipient_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        match_revision      INTEGER NOT NULL DEFAULT 1,
         match_reason        VARCHAR(30) NOT NULL DEFAULT 'opposite_listing'
                             CHECK (match_reason IN ('opposite_listing','favorite_product')),
         status              VARCHAR(20) NOT NULL DEFAULT 'pending'
@@ -574,11 +577,11 @@ console.log('DB INFO:', dbInfo.rows[0]);
         next_attempt_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         last_error          TEXT,
         sent_at             TIMESTAMPTZ,
-        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE (new_listing_id,recipient_id)
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
     await client.query(`ALTER TABLE listing_match_outbox ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ`);
+    await client.query(`ALTER TABLE listing_match_outbox ADD COLUMN IF NOT EXISTS match_revision INTEGER NOT NULL DEFAULT 1`);
     await client.query(`ALTER TABLE listing_match_outbox ADD COLUMN IF NOT EXISTS match_reason VARCHAR(30) NOT NULL DEFAULT 'opposite_listing'`);
     await client.query(`ALTER TABLE listing_match_outbox DROP CONSTRAINT IF EXISTS listing_match_outbox_match_reason_check`);
     await client.query(`
@@ -597,9 +600,15 @@ console.log('DB INFO:', dbInfo.rows[0]);
       SET status='permanent_failed',claimed_at=NULL
       WHERE status='failed' AND attempts>=3
     `);
+    await client.query(`ALTER TABLE listing_match_outbox DROP CONSTRAINT IF EXISTS listing_match_outbox_new_listing_id_recipient_id_key`);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_match_outbox_revision_recipient
+      ON listing_match_outbox(new_listing_id,recipient_id,match_revision)
+    `);
     await client.query(`
       CREATE TABLE IF NOT EXISTS listing_match_jobs (
-        listing_id       UUID PRIMARY KEY REFERENCES listings(id) ON DELETE CASCADE,
+        listing_id       UUID NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+        match_revision   INTEGER NOT NULL DEFAULT 1,
         status           VARCHAR(20) NOT NULL DEFAULT 'pending'
                          CHECK (status IN ('pending','processing','done','failed','permanent_failed')),
         attempts         INTEGER NOT NULL DEFAULT 0,
@@ -607,8 +616,24 @@ console.log('DB INFO:', dbInfo.rows[0]);
         claimed_at       TIMESTAMPTZ,
         processed_at     TIMESTAMPTZ,
         last_error       TEXT,
-        created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (listing_id,match_revision)
       )
+    `);
+    await client.query(`ALTER TABLE listing_match_jobs ADD COLUMN IF NOT EXISTS match_revision INTEGER NOT NULL DEFAULT 1`);
+    await client.query(`ALTER TABLE listing_match_jobs DROP CONSTRAINT IF EXISTS listing_match_jobs_pkey`);
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname='listing_match_jobs_pkey'
+            AND conrelid='listing_match_jobs'::regclass
+        ) THEN
+          ALTER TABLE listing_match_jobs
+          ADD CONSTRAINT listing_match_jobs_pkey PRIMARY KEY (listing_id,match_revision);
+        END IF;
+      END $$;
     `);
     await client.query(`
       CREATE TABLE IF NOT EXISTS listing_match_daily_counts (

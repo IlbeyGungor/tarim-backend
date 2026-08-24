@@ -8,6 +8,7 @@ const notify = require('../utils/notify');
 const { resolveProductIdentity } = require('../utils/productCatalog');
 const { recordProductInterest } = require('../services/productInterest');
 const { queueListingMatches, runListingMatchWorkers } = require('../services/listingMatches');
+const { buildListingUpdate } = require('../services/listingUpdates');
 const {
   isListingUnit,
   areListingUnitsCompatible,
@@ -430,100 +431,86 @@ router.post('/:id/close', authMiddleware, async (req, res, next) => {
 
 // PATCH /api/listings/:id  (auth, owner only)
 router.patch('/:id', authMiddleware, async (req, res, next) => {
+  const client = await getClient();
   try {
-    const { rows: existing } = await query('SELECT * FROM listings WHERE id=$1', [req.params.id]);
-    if (!existing.length) return res.status(404).json({ error: 'İlan bulunamadı.' });
-    if (existing[0].seller_id !== req.user.id) return res.status(403).json({ error: 'Yetki yok.' });
-    const quantityScopeChanged =
-      req.body.quantity !== undefined || req.body.quantity_unlimited !== undefined;
-    if (quantityScopeChanged) {
-      if (req.body.quantity_unlimited !== undefined &&
-          typeof req.body.quantity_unlimited !== 'boolean') {
-        return res.status(400).json({ error: 'Miktar sınırı seçimi geçersiz.' });
-      }
-      const quantityScope = normalizeListingQuantity({
-        quantity: req.body.quantity ?? existing[0].quantity,
-        quantityUnlimited:
-          req.body.quantity_unlimited ?? existing[0].quantity_unlimited,
+    await client.query('BEGIN');
+    const { rows: existing } = await client.query(
+      'SELECT * FROM listings WHERE id=$1 FOR UPDATE',
+      [req.params.id]
+    );
+    if (!existing.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'İlan bulunamadı.' });
+    }
+    if (existing[0].seller_id !== req.user.id) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Yetki yok.' });
+    }
+    if (existing[0].status !== 'active') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'Yalnızca aktif ilanlar düzenlenebilir.',
+        code: 'LISTING_NOT_ACTIVE',
       });
-      if (!quantityScope.quantityUnlimited &&
-          quantityScope.quantity <= Number(existing[0].fulfilled_quantity)) {
-        return res.status(400).json({
-          error: 'Hedef miktar kabul edilmiş miktardan büyük olmalıdır.',
-        });
-      }
-      req.body.quantity = quantityScope.quantity;
-      req.body.quantity_unlimited = quantityScope.quantityUnlimited;
-    }
-    const locationScopeChanged =
-      req.body.city !== undefined || req.body.district !== undefined ||
-      req.body.is_nationwide !== undefined;
-    if (locationScopeChanged) {
-      if (req.body.is_nationwide !== undefined &&
-          typeof req.body.is_nationwide !== 'boolean') {
-        return res.status(400).json({ error: 'Türkiye geneli seçimi geçersiz.' });
-      }
-      const locationScope = normalizeListingLocation({
-        city: req.body.city ?? existing[0].city,
-        district: req.body.district ?? existing[0].district,
-        isNationwide: req.body.is_nationwide ?? existing[0].is_nationwide,
-      });
-      req.body.city = locationScope.city;
-      req.body.district = locationScope.district;
-      req.body.is_nationwide = locationScope.isNationwide;
-    }
-    if (req.body.price_per_unit !== undefined && req.body.price_per_unit !== null &&
-        req.body.price_per_unit !== '' && !(Number(req.body.price_per_unit) > 0)) {
-      return res.status(400).json({ error: 'Birim fiyat sıfırdan büyük olmalıdır.' });
-    }
-    if (req.body.price_type !== undefined &&
-        !['fixed', 'negotiate'].includes(req.body.price_type)) {
-      return res.status(400).json({ error: 'Geçersiz fiyat tipi.' });
     }
 
-    const nextUnit = req.body.unit ?? existing[0].unit;
-    const nextPriceUnit = req.body.price_unit ?? existing[0].price_unit ?? nextUnit;
-    if (!isListingUnit(nextUnit) || !isListingUnit(nextPriceUnit) ||
-        !areListingUnitsCompatible(nextUnit, nextPriceUnit)) {
-      return res.status(400).json({ error: 'Miktar ve fiyat birimleri birbiriyle uyumlu değil.' });
+    const normalized = buildListingUpdate(existing[0], req.body || {});
+    if (!normalized.hasChanges) {
+      await client.query('COMMIT');
+      return res.json((await fetchFullListing(existing[0].id)) || existing[0]);
     }
 
-    const priceWasProvided = Object.prototype.hasOwnProperty.call(req.body, 'price_per_unit');
-    const finalPrice = priceWasProvided
-      ? (req.body.price_per_unit === '' ? null : req.body.price_per_unit)
-      : existing[0].price_per_unit;
-    if (finalPrice == null) {
-      req.body.price_per_unit = null;
-      req.body.price_type = 'negotiate';
+    const entries = Object.entries(normalized.updates);
+    const params = entries.map(([, value]) => value);
+    const sets = entries.map(([key], index) => `${key}=$${index + 1}`);
+    let nextRevision = Number(existing[0].match_revision) || 1;
+    if (normalized.productFamilyChanged) {
+      nextRevision += 1;
+      params.push(nextRevision);
+      sets.push(`match_revision=$${params.length}`);
     }
-
-    if (req.body.crop_name !== undefined) {
-      const identity = resolveProductIdentity(
-        req.body.crop_name,
-        existing[0].category,
-        req.body.catalog_product_key || null
-      );
-      req.body.product_key = identity.product_key;
-      req.body.product_family_key = identity.product_family_key;
-      req.body.catalog_product_key = req.body.catalog_product_key || null;
-    }
-
-    const allowed = ['crop_name','quantity','quantity_unlimited','unit','price_per_unit','price_unit','price_type','city','district','is_nationwide','address','description','harvest_date','product_key','product_family_key','catalog_product_key'];
-    const sets = [], params = [];
-    for (const key of allowed) {
-      if (req.body[key] !== undefined) {
-        params.push(req.body[key]);
-        sets.push(`${key}=$${params.length}`);
-      }
-    }
-    if (!sets.length) return res.status(400).json({ error: 'Güncellenecek alan yok.' });
     params.push(req.params.id);
-    const { rows } = await query(
-      `UPDATE listings SET ${sets.join(',')}, updated_at=NOW() WHERE id=$${params.length} RETURNING *`,
+    const { rows } = await client.query(
+      `UPDATE listings SET ${sets.join(',')},updated_at=NOW()
+       WHERE id=$${params.length} RETURNING *`,
       params
     );
+
+    const recipients = normalized.visibleChanged
+      ? (await client.query(`
+          SELECT DISTINCT buyer_id AS recipient_id
+          FROM offers
+          WHERE listing_id=$1 AND status IN ('pending','countered','accepted')
+            AND buyer_id<>$2
+        `, [req.params.id, req.user.id])).rows
+      : [];
+    if (normalized.productFamilyChanged) {
+      await queueListingMatches(client, rows[0]);
+    }
+    await client.query('COMMIT');
+
+    recipients.forEach(({ recipient_id }) => {
+      sendNotification('listingUpdated', notify.listingUpdated({
+        recipientId: recipient_id,
+        cropName: rows[0].crop_name,
+        listingId: rows[0].id,
+      }));
+    });
+    if (normalized.productFamilyChanged) {
+      runListingMatchWorkers({ listingId: rows[0].id }).catch((err) =>
+        console.error('[notification] edited listing match dispatch failed:', err)
+      );
+    }
     res.json((await fetchFullListing(rows[0].id)) || rows[0]);
-  } catch (err) { next(err); }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (err.status) {
+      return res.status(err.status).json({ error: err.message, code: err.code || undefined });
+    }
+    next(err);
+  } finally {
+    client.release();
+  }
 });
 
 // DELETE /api/listings/:id  (auth, owner only)

@@ -202,6 +202,14 @@ const notify = {
       data: { type: 'listing_match', listing_id: String(listingId) },
     });
   },
+
+  async listingUpdated({ recipientId, cropName, listingId }) {
+    return sendToUser(recipientId, {
+      title: 'İlan Güncellendi',
+      body: `Teklif verdiğiniz "${cropName}" ilanının bilgileri güncellendi.`,
+      data: { type: 'listing_updated', listing_id: String(listingId) },
+    });
+  },
 };
 
 module.exports = notify;

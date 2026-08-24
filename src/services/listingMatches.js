@@ -8,11 +8,11 @@ const MAX_ATTEMPTS = 3;
 async function queueListingMatches(client, listing) {
   if (!listing?.id || !listing.product_family_key) return false;
   const result = await client.query(`
-    INSERT INTO listing_match_jobs (listing_id)
-    VALUES ($1)
-    ON CONFLICT (listing_id) DO NOTHING
-    RETURNING listing_id
-  `, [listing.id]);
+    INSERT INTO listing_match_jobs (listing_id,match_revision)
+    VALUES ($1,$2)
+    ON CONFLICT (listing_id,match_revision) DO NOTHING
+    RETURNING listing_id,match_revision
+  `, [listing.id, Number(listing.match_revision) || 1]);
   return result.rowCount > 0;
 }
 
@@ -35,9 +35,9 @@ async function claimListingMatchJobs({
           last_error=COALESCE(last_error,'Worker üçüncü denemede kesildi.')
       WHERE status='processing' AND attempts>=${MAX_ATTEMPTS}
         AND claimed_at < NOW()-INTERVAL '10 minutes'
-      RETURNING listing_id
+      RETURNING listing_id,match_revision
     ), candidates AS (
-      SELECT j.listing_id
+      SELECT j.listing_id,j.match_revision
       FROM listing_match_jobs j
       WHERE j.attempts < ${MAX_ATTEMPTS}
         AND (
@@ -53,6 +53,7 @@ async function claimListingMatchJobs({
     SET status='processing',attempts=j.attempts+1,claimed_at=NOW(),last_error=NULL
     FROM candidates c
     WHERE j.listing_id=c.listing_id
+      AND j.match_revision=c.match_revision
     RETURNING j.*
   `, params);
   return rows;
@@ -63,11 +64,11 @@ async function expandListingMatchJob(job, { getClientFn = getClient, queryFn = q
   try {
     await client.query('BEGIN');
     const { rows: listingRows } = await client.query(`
-      SELECT id,seller_id,listing_type,product_family_key
+      SELECT id,seller_id,listing_type,product_family_key,match_revision
       FROM listings
-      WHERE id=$1 AND status='active'
+      WHERE id=$1 AND status='active' AND match_revision=$2
       FOR SHARE
-    `, [job.listing_id]);
+    `, [job.listing_id, job.match_revision]);
     const listing = listingRows[0];
     if (listing) {
       const oppositeType = listing.listing_type === 'buy' ? 'sell' : 'buy';
@@ -127,20 +128,20 @@ async function expandListingMatchJob(job, { getClientFn = getClient, queryFn = q
           RETURNING recipient_id
         )
         INSERT INTO listing_match_outbox
-          (new_listing_id,matched_listing_id,recipient_id,match_reason)
+          (new_listing_id,matched_listing_id,recipient_id,match_reason,match_revision)
         SELECT $4,c.matched_listing_id,c.recipient_id,
                CASE WHEN c.favorite_match THEN 'favorite_product'
-                    ELSE 'opposite_listing' END
+                    ELSE 'opposite_listing' END,$5
         FROM candidates c
         JOIN admitted a USING (recipient_id)
-        ON CONFLICT (new_listing_id,recipient_id) DO NOTHING
-      `, [oppositeType, listing.product_family_key, listing.seller_id, listing.id]);
+        ON CONFLICT (new_listing_id,recipient_id,match_revision) DO NOTHING
+      `, [oppositeType, listing.product_family_key, listing.seller_id, listing.id, job.match_revision]);
     }
     await client.query(`
       UPDATE listing_match_jobs
       SET status='done',processed_at=NOW(),claimed_at=NULL,last_error=NULL
-      WHERE listing_id=$1
-    `, [job.listing_id]);
+      WHERE listing_id=$1 AND match_revision=$2
+    `, [job.listing_id, job.match_revision]);
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
@@ -149,8 +150,8 @@ async function expandListingMatchJob(job, { getClientFn = getClient, queryFn = q
       UPDATE listing_match_jobs
       SET status=$2,claimed_at=NULL,last_error=$3,
           next_attempt_at=NOW()+(INTERVAL '5 minutes' * LEAST(attempts,3))
-      WHERE listing_id=$1
-    `, [job.listing_id, terminal ? 'permanent_failed' : 'failed', error.message]);
+      WHERE listing_id=$1 AND match_revision=$4
+    `, [job.listing_id, terminal ? 'permanent_failed' : 'failed', error.message, job.match_revision]);
     throw error;
   } finally {
     client.release();
@@ -213,7 +214,7 @@ async function claimPendingNotifications({
     )
     SELECT c.*,l.crop_name,l.listing_type,l.product_family_key,
            CASE
-             WHEN l.status<>'active' THEN false
+             WHEN l.status<>'active' OR l.match_revision<>c.match_revision THEN false
              WHEN u.account_status<>'active' THEN false
              WHEN EXISTS (
                SELECT 1 FROM user_blocks ub

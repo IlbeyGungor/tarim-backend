@@ -19,10 +19,13 @@ test('listing creation only queues one asynchronous match job', async () => {
   const queued = await queueListingMatches(client, {
     id: 'listing-1',
     product_family_key: 'limon',
+    match_revision: 3,
   });
   assert.equal(queued, true);
   assert.equal(calls.length, 1);
   assert.match(calls[0].sql, /INSERT INTO listing_match_jobs/);
+  assert.match(calls[0].sql, /ON CONFLICT \(listing_id,match_revision\)/);
+  assert.deepEqual(calls[0].params, ['listing-1', 3]);
 });
 
 test('job and notification claims use skip locked for multiple workers', async () => {
@@ -64,6 +67,7 @@ test('match expansion combines opposite listings and favorite subscribers', asyn
             seller_id: 'seller-1',
             listing_type: 'sell',
             product_family_key: 'limon',
+            match_revision: 2,
           }],
         };
       }
@@ -72,7 +76,7 @@ test('match expansion combines opposite listings and favorite subscribers', asyn
     release() {},
   };
   await expandListingMatchJob(
-    { listing_id: 'listing-1', attempts: 1 },
+    { listing_id: 'listing-1', match_revision: 2, attempts: 1 },
     { getClientFn: async () => client, queryFn: async () => ({ rows: [] }) },
   );
   const expansion = statements.find((sql) => /raw_candidates/.test(sql));
@@ -94,4 +98,6 @@ test('match expansion combines opposite listings and favorite subscribers', asyn
   assert.match(expansion, /favorite_product_notifications_enabled/);
   assert.match(expansion, /favorite_product/);
   assert.match(expansion, /listing_match_daily_counts/);
+  assert.match(expansion, /match_revision/);
+  assert.match(expansion, /ON CONFLICT \(new_listing_id,recipient_id,match_revision\)/);
 });
