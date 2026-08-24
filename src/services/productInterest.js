@@ -1,5 +1,6 @@
 const { getClient, query } = require('../db');
 const { resolveProductIdentity } = require('../utils/productCatalog');
+const { pruneOldContactEvents } = require('./contactAnalytics');
 
 const SCORES = {
   search: 1,
@@ -109,7 +110,7 @@ async function pruneOldInterestEvents() {
 function scheduleProductInterestPruning() {
   if (process.env.DISABLE_PRODUCT_INTEREST_SCHEDULER === 'true') return;
   const timer = setInterval(() => {
-    pruneOldInterestEvents().catch((err) =>
+    Promise.all([pruneOldInterestEvents(), pruneOldContactEvents()]).catch((err) =>
       console.error('[analytics] product interest pruning failed:', err)
     );
   }, 24 * 60 * 60 * 1000);

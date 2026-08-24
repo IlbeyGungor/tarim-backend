@@ -11,6 +11,7 @@ const offerRoutes    = require('./routes/offers');
 const adminRoutes    = require('./routes/admin');
 const productRoutes  = require('./routes/products');
 const interestRoutes = require('./routes/interests');
+const analyticsRoutes = require('./routes/analytics');
 const { pricesRouter, usersRouter } = require('./routes/other');
 const errorHandler   = require('./middleware/errorHandler');
 const { scheduleReservedListingCleanup } = require('./jobs/cleanupReservedListings');
@@ -21,6 +22,10 @@ const { appleAppSiteAssociation, androidAssetLinks } = require('./routes/appAsso
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
+
+// Caddy is the only public proxy in production. Rate limits must use the
+// original client address instead of grouping all traffic under Caddy's IP.
+app.set('trust proxy', 1);
 
 const uploadRoutes = require('./routes/upload');
 const tokenRoutes = require('./routes/tokens');
@@ -97,6 +102,7 @@ app.use('/api/offers',   offerRoutes);
 app.use('/api/admin',    adminRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/interests', interestRoutes);
+app.use('/api/analytics', analyticsRoutes);
 app.use('/api/prices',   pricesRouter);
 app.use('/api/users',    usersRouter);
 app.use('/ilan',         listingPageRouter);

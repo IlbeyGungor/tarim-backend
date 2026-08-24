@@ -5,6 +5,7 @@ const { query, getClient } = require('../db');
 const authMiddleware = require('../middleware/auth');
 const notify = require('../utils/notify');
 const { recordProductInterest } = require('../services/productInterest');
+const { recordContactEvent } = require('../services/contactAnalytics');
 
 function sendNotification(type, promise) {
   promise.catch((err) => {
@@ -1087,24 +1088,40 @@ router.post('/:id/messages', authMiddleware, [
 ], async (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+  let client;
   try {
     const offer = await requireAcceptedChatParticipant(req.params.id, req.user.id);
     if (!offer) return res.status(404).json({ error: 'Sohbet bulunamadı.' });
 
-    const { rows } = await query(
-      'INSERT INTO messages (offer_id,sender_id,text) VALUES ($1,$2,$3) RETURNING *',
+    client = await getClient();
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `INSERT INTO messages (offer_id,sender_id,text,action_type)
+       VALUES ($1,$2,$3,'chat') RETURNING *`,
       [req.params.id, req.user.id, req.body.text]
     );
-    await recordProductInterest({
+    const clearColumn = offer.buyer_id === req.user.id ? 'seller_chat_deleted_at' : 'buyer_chat_deleted_at';
+    await client.query(`UPDATE offers SET ${clearColumn}=NULL, updated_at=NOW() WHERE id=$1`, [req.params.id]);
+    const isBuyer = offer.buyer_id === req.user.id;
+    await recordContactEvent({
+      eventId: `message:${rows[0].id}`,
+      channel: 'message',
+      actorUserId: req.user.id,
+      recipientUserId: isBuyer ? offer.seller_id : offer.buyer_id,
+      listingId: offer.listing_id,
+      offerId: offer.id,
+      dbQuery: client.query.bind(client),
+    });
+    await client.query('COMMIT');
+    recordProductInterest({
       userId: req.user.id,
       eventId: `message-sent:${rows[0].id}`,
       eventType: 'message_sent',
       listing: offer,
       listingId: offer.listing_id,
+    }).catch((err) => {
+      console.error('[analytics] message interest failed:', err);
     });
-    const clearColumn = offer.buyer_id === req.user.id ? 'seller_chat_deleted_at' : 'buyer_chat_deleted_at';
-    await query(`UPDATE offers SET ${clearColumn}=NULL, updated_at=NOW() WHERE id=$1`, [req.params.id]);
-    const isBuyer = offer.buyer_id === req.user.id;
     sendNotification('chatMessage', notify.chatMessage({
       recipientId: isBuyer ? offer.seller_id : offer.buyer_id,
       senderName: isBuyer ? offer.buyer_name : offer.seller_name,
@@ -1113,7 +1130,12 @@ router.post('/:id/messages', authMiddleware, [
       listingId: offer.listing_id,
     }));
     res.status(201).json(rows[0]);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (client) await client.query('ROLLBACK').catch(() => {});
+    next(err);
+  } finally {
+    client?.release();
+  }
 });
 
 module.exports = router;

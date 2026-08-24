@@ -434,6 +434,46 @@ console.log('DB INFO:', dbInfo.rows[0]);
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS contact_events (
+        id                 UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        event_id           VARCHAR(160) NOT NULL UNIQUE,
+        channel            VARCHAR(20) NOT NULL CHECK (channel IN ('call','message')),
+        actor_user_id      UUID REFERENCES users(id) ON DELETE SET NULL,
+        recipient_user_id  UUID REFERENCES users(id) ON DELETE SET NULL,
+        listing_id         UUID REFERENCES listings(id) ON DELETE SET NULL,
+        offer_id           UUID REFERENCES offers(id) ON DELETE SET NULL,
+        contact_key        VARCHAR(180),
+        is_guest           BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`
+      INSERT INTO contact_events (
+        event_id,channel,actor_user_id,recipient_user_id,listing_id,offer_id,
+        contact_key,is_guest,created_at
+      )
+      SELECT
+        'message:' || m.id::text,
+        'message',
+        m.sender_id,
+        CASE WHEN m.sender_id=o.buyer_id THEN l.seller_id ELSE o.buyer_id END,
+        o.listing_id,
+        o.id,
+        o.listing_id::text || ':' ||
+          LEAST(m.sender_id::text,
+            (CASE WHEN m.sender_id=o.buyer_id THEN l.seller_id ELSE o.buyer_id END)::text) || ':' ||
+          GREATEST(m.sender_id::text,
+            (CASE WHEN m.sender_id=o.buyer_id THEN l.seller_id ELSE o.buyer_id END)::text),
+        false,
+        m.created_at
+      FROM messages m
+      JOIN offers o ON o.id=m.offer_id
+      JOIN listings l ON l.id=o.listing_id
+      WHERE COALESCE(m.action_type,'chat')='chat'
+        AND m.sender_id IN (o.buyer_id,l.seller_id)
+      ON CONFLICT (event_id) DO NOTHING
+    `);
+    await client.query(`
       CREATE TABLE IF NOT EXISTS product_interest_events (
         id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
         event_id            VARCHAR(160) NOT NULL,
@@ -451,6 +491,27 @@ console.log('DB INFO:', dbInfo.rows[0]);
         created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE (user_id,event_id)
       )
+    `);
+    await client.query(`
+      INSERT INTO contact_events (
+        event_id,channel,actor_user_id,recipient_user_id,listing_id,
+        contact_key,is_guest,created_at
+      )
+      SELECT
+        'interest-call:' || pie.id::text,
+        'call',
+        pie.user_id,
+        l.seller_id,
+        l.id,
+        l.id::text || ':' || LEAST(pie.user_id::text,l.seller_id::text) || ':' ||
+          GREATEST(pie.user_id::text,l.seller_id::text),
+        false,
+        pie.created_at
+      FROM product_interest_events pie
+      JOIN listings l ON l.id=pie.listing_id
+      WHERE pie.event_type='call_button_click'
+        AND pie.user_id<>l.seller_id
+      ON CONFLICT (event_id) DO NOTHING
     `);
     await client.query(`
       CREATE TABLE IF NOT EXISTS user_product_interests (
@@ -643,6 +704,12 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_users_account_status ON users(account_status)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_users_last_active ON users(last_active_at DESC)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_user_activity_date ON user_activity_daily(activity_date DESC)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_contact_events_created ON contact_events(created_at DESC)`);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_contact_events_contact_created
+      ON contact_events(contact_key,channel,created_at DESC)
+      WHERE contact_key IS NOT NULL
+    `);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_auth_challenges_phone_created ON auth_challenges(phone, created_at DESC)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_auth_challenges_expires ON auth_challenges(expires_at) WHERE used_at IS NULL`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit_logs(created_at DESC)`);
