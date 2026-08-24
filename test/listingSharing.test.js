@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {
   defaultProductImageId,
   defaultProductImageUrl,
+  listingPageRouter,
   listingUrl,
   withListingShareUrls,
 } = require('../src/routes/listingPages');
@@ -31,6 +32,31 @@ test('listingUrl uses the canonical www origin and Turkish-safe slug', () => {
     listingUrl(listing),
     'https://www.tarim-pazar.com/ilan/tuncay-sorguc-sakarya-geyve-cengelkoy-salataligi-6fb265a4-3d01-4d67-911b-f47e97b00663/'
   );
+});
+
+test('nationwide listings use the canonical turkiye-geneli slug and labels', () => {
+  const nationwide = {
+    ...listing,
+    city: null,
+    district: null,
+    is_nationwide: true,
+    quantity: 0,
+    quantity_unlimited: true,
+    price_per_unit: 10,
+    price_unit: 'kg',
+    unit: 'kg',
+    listing_type: 'sell',
+    category: 'fruit',
+    price_type: 'fixed',
+    status: 'active',
+    fulfilled_quantity: 20,
+    image_urls: [],
+  };
+  assert.match(listingUrl(nationwide), /turkiye-geneli/);
+  const html = listingPageRouter.helpers.renderListing(nationwide);
+  assert.match(html, /Türkiye Geneli/);
+  assert.match(html, /Kısıt yok/);
+  assert.doesNotMatch(html, /Toplam Değer/);
 });
 
 test('withListingShareUrls enriches direct and embedded listings', () => {

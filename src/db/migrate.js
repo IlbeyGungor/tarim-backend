@@ -109,12 +109,14 @@ console.log('DB INFO:', dbInfo.rows[0]);
         crop_name       VARCHAR(120) NOT NULL,
         category        VARCHAR(40)  NOT NULL CHECK (category IN ('grain','vegetable','fruit','nut','legume','other')),
         quantity        NUMERIC(12,2) NOT NULL,
+        quantity_unlimited BOOLEAN NOT NULL DEFAULT FALSE,
         unit            VARCHAR(20)  NOT NULL DEFAULT 'kg',
         price_per_unit  NUMERIC(10,2),
         price_unit      VARCHAR(20)  NOT NULL DEFAULT 'kg',
         price_type      VARCHAR(20)  NOT NULL CHECK (price_type IN ('fixed','negotiate')) DEFAULT 'negotiate',
         city            VARCHAR(80),
         district        VARCHAR(80),
+        is_nationwide   BOOLEAN NOT NULL DEFAULT FALSE,
         address         VARCHAR(255),
         description     TEXT,
         status          VARCHAR(20)  NOT NULL CHECK (status IN ('active','sold','reserved')) DEFAULT 'active',
@@ -157,6 +159,8 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS reserved_until TIMESTAMPTZ`);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS listing_type VARCHAR(10) NOT NULL DEFAULT 'sell'`);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS fulfilled_quantity NUMERIC(12,2) NOT NULL DEFAULT 0`);
+    await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS quantity_unlimited BOOLEAN NOT NULL DEFAULT FALSE`);
+    await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS is_nationwide BOOLEAN NOT NULL DEFAULT FALSE`);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS product_key VARCHAR(160)`);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS product_family_key VARCHAR(180)`);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS catalog_product_key VARCHAR(160)`);
@@ -168,6 +172,25 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`
       DO $$
       BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname='listings_quantity_scope_check'
+            AND conrelid='listings'::regclass
+        ) THEN
+          ALTER TABLE listings ADD CONSTRAINT listings_quantity_scope_check
+          CHECK (
+            (quantity_unlimited=TRUE AND quantity=0)
+            OR (quantity_unlimited=FALSE AND quantity>0)
+          ) NOT VALID;
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname='listings_nationwide_location_check'
+            AND conrelid='listings'::regclass
+        ) THEN
+          ALTER TABLE listings ADD CONSTRAINT listings_nationwide_location_check
+          CHECK (is_nationwide=FALSE OR (city IS NULL AND district IS NULL)) NOT VALID;
+        END IF;
         IF NOT EXISTS (
           SELECT 1 FROM pg_constraint
           WHERE conname='listings_price_positive_check'
@@ -663,6 +686,7 @@ console.log('DB INFO:', dbInfo.rows[0]);
     // ── Indexes ────────────────────────────────────────────────
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_seller     ON listings(seller_id)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_city       ON listings(city)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_nationwide ON listings(is_nationwide) WHERE is_nationwide=TRUE`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_category   ON listings(category)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_status     ON listings(status)`);
     await client.query(`

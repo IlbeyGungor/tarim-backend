@@ -150,7 +150,8 @@ router.get('/listings', async (req, res, next) => {
     params.push(limit, offset);
     const [{ rows }, countResult] = await Promise.all([
       query(`
-        SELECT l.*,GREATEST(l.quantity-l.fulfilled_quantity,0) AS remaining_quantity,
+        SELECT l.*,CASE WHEN l.quantity_unlimited THEN 0
+                 ELSE GREATEST(l.quantity-l.fulfilled_quantity,0) END AS remaining_quantity,
                json_build_object('id',u.id,'name',u.name,'email',u.email,'phone',u.phone,
                  'profile_image',u.profile_image) AS seller
         FROM listings l JOIN users u ON u.id=l.seller_id

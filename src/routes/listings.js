@@ -12,6 +12,10 @@ const {
   isListingUnit,
   areListingUnitsCompatible,
 } = require('../utils/listingUnits');
+const {
+  normalizeListingLocation,
+  normalizeListingQuantity,
+} = require('../utils/listingScope');
 
 function sendNotification(type, promise) {
   promise.catch((err) => {
@@ -23,7 +27,8 @@ function sendNotification(type, promise) {
 const LISTING_SELECT = `
   SELECT
     l.*,
-    GREATEST(l.quantity - l.fulfilled_quantity, 0) AS remaining_quantity,
+    CASE WHEN l.quantity_unlimited THEN 0
+      ELSE GREATEST(l.quantity - l.fulfilled_quantity, 0) END AS remaining_quantity,
     json_build_object(
       'id', u.id, 'name', u.name, 'phone', u.phone,
       'phone_verified', u.phone_verified, 'city', u.city, 'district', u.district,
@@ -73,7 +78,10 @@ router.get('/', authMiddleware.optional, async (req, res, next) => {
       conditions.push(`(l.crop_name ILIKE $${params.length} OR l.city ILIKE $${params.length} OR l.district ILIKE $${params.length})`);
     }
     if (category) { params.push(category); conditions.push(`l.category = $${params.length}`); }
-    if (city)     { params.push(city);     conditions.push(`l.city = $${params.length}`); }
+    if (city) {
+      params.push(city);
+      conditions.push(`(l.city = $${params.length} OR l.is_nationwide=TRUE)`);
+    }
     if (listing_type) {
       if (!['sell', 'buy'].includes(listing_type)) {
         return res.status(400).json({ error: 'Geçersiz ilan tipi.' });
@@ -280,7 +288,11 @@ router.post('/', authMiddleware, [
   body('listing_type').optional().isIn(['sell','buy']),
   body('crop_name').trim().notEmpty().withMessage('Ürün adı zorunludur.'),
   body('category').isIn(['grain','vegetable','fruit','nut','legume','other']),
-  body('quantity').isFloat({ gt: 0 }),
+  body('quantity').optional({ nullable: true }).custom((value) =>
+    value === '' || (Number.isFinite(Number(value)) && Number(value) > 0)
+  ),
+  body('quantity_unlimited').optional().isBoolean().toBoolean(),
+  body('is_nationwide').optional().isBoolean().toBoolean(),
   body('unit').optional().custom(isListingUnit),
   body('price_unit').optional().custom(isListingUnit),
   body('price_per_unit').optional({ nullable: true }).isFloat({ gt: 0 }),
@@ -294,8 +306,19 @@ router.post('/', authMiddleware, [
     const {
       listing_type = 'sell', crop_name, category, quantity, unit = 'kg',
       price_per_unit, price_unit = unit, price_type = 'negotiate',
-      city, district, address, description, harvest_date, catalog_product_key
+      city, district, address, description, harvest_date, catalog_product_key,
+      quantity_unlimited = false, is_nationwide = false
     } = req.body;
+
+    const quantityScope = normalizeListingQuantity({
+      quantity,
+      quantityUnlimited: quantity_unlimited,
+    });
+    const locationScope = normalizeListingLocation({
+      city,
+      district,
+      isNationwide: is_nationwide,
+    });
 
     if (!areListingUnitsCompatible(unit, price_unit)) {
       return res.status(400).json({ error: 'Miktar ve fiyat birimleri birbiriyle uyumlu değil.' });
@@ -309,11 +332,16 @@ router.post('/', authMiddleware, [
     await client.query('BEGIN');
     const { rows } = await client.query(`
       INSERT INTO listings
-        (seller_id,listing_type,crop_name,category,quantity,unit,price_per_unit,price_unit,price_type,city,district,address,description,harvest_date,product_key,product_family_key,catalog_product_key)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+        (seller_id,listing_type,crop_name,category,quantity,quantity_unlimited,unit,
+         price_per_unit,price_unit,price_type,city,district,is_nationwide,address,
+         description,harvest_date,product_key,product_family_key,catalog_product_key)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
       RETURNING *
-    `, [req.user.id, listing_type, crop_name, category, quantity, unit, normalizedPrice, price_unit, normalizedPriceType,
-        city||null, district||null, address||null, description||null, harvest_date||null,
+    `, [req.user.id, listing_type, crop_name, category,
+        quantityScope.quantity, quantityScope.quantityUnlimited, unit,
+        normalizedPrice, price_unit, normalizedPriceType,
+        locationScope.city, locationScope.district, locationScope.isNationwide,
+        address||null, description||null, harvest_date||null,
         identity.product_key, identity.product_family_key, catalog_product_key||null]);
 
     await recordProductInterest({
@@ -376,7 +404,8 @@ router.post('/:id/close', authMiddleware, async (req, res, next) => {
       SET status='reserved', reserved_at=NOW(),
           reserved_until=NOW() + INTERVAL '7 days', updated_at=NOW()
       WHERE id=$1
-      RETURNING *, GREATEST(quantity - fulfilled_quantity, 0) AS remaining_quantity
+      RETURNING *, CASE WHEN quantity_unlimited THEN 0
+        ELSE GREATEST(quantity - fulfilled_quantity, 0) END AS remaining_quantity
     `, [req.params.id]);
     await client.query('COMMIT');
 
@@ -405,13 +434,43 @@ router.patch('/:id', authMiddleware, async (req, res, next) => {
     const { rows: existing } = await query('SELECT * FROM listings WHERE id=$1', [req.params.id]);
     if (!existing.length) return res.status(404).json({ error: 'İlan bulunamadı.' });
     if (existing[0].seller_id !== req.user.id) return res.status(403).json({ error: 'Yetki yok.' });
-    if (req.body.quantity !== undefined) {
-      const quantity = Number(req.body.quantity);
-      if (!Number.isFinite(quantity) || quantity <= Number(existing[0].fulfilled_quantity)) {
+    const quantityScopeChanged =
+      req.body.quantity !== undefined || req.body.quantity_unlimited !== undefined;
+    if (quantityScopeChanged) {
+      if (req.body.quantity_unlimited !== undefined &&
+          typeof req.body.quantity_unlimited !== 'boolean') {
+        return res.status(400).json({ error: 'Miktar sınırı seçimi geçersiz.' });
+      }
+      const quantityScope = normalizeListingQuantity({
+        quantity: req.body.quantity ?? existing[0].quantity,
+        quantityUnlimited:
+          req.body.quantity_unlimited ?? existing[0].quantity_unlimited,
+      });
+      if (!quantityScope.quantityUnlimited &&
+          quantityScope.quantity <= Number(existing[0].fulfilled_quantity)) {
         return res.status(400).json({
           error: 'Hedef miktar kabul edilmiş miktardan büyük olmalıdır.',
         });
       }
+      req.body.quantity = quantityScope.quantity;
+      req.body.quantity_unlimited = quantityScope.quantityUnlimited;
+    }
+    const locationScopeChanged =
+      req.body.city !== undefined || req.body.district !== undefined ||
+      req.body.is_nationwide !== undefined;
+    if (locationScopeChanged) {
+      if (req.body.is_nationwide !== undefined &&
+          typeof req.body.is_nationwide !== 'boolean') {
+        return res.status(400).json({ error: 'Türkiye geneli seçimi geçersiz.' });
+      }
+      const locationScope = normalizeListingLocation({
+        city: req.body.city ?? existing[0].city,
+        district: req.body.district ?? existing[0].district,
+        isNationwide: req.body.is_nationwide ?? existing[0].is_nationwide,
+      });
+      req.body.city = locationScope.city;
+      req.body.district = locationScope.district;
+      req.body.is_nationwide = locationScope.isNationwide;
     }
     if (req.body.price_per_unit !== undefined && req.body.price_per_unit !== null &&
         req.body.price_per_unit !== '' && !(Number(req.body.price_per_unit) > 0)) {
@@ -449,7 +508,7 @@ router.patch('/:id', authMiddleware, async (req, res, next) => {
       req.body.catalog_product_key = req.body.catalog_product_key || null;
     }
 
-    const allowed = ['crop_name','quantity','unit','price_per_unit','price_unit','price_type','description','harvest_date','product_key','product_family_key','catalog_product_key'];
+    const allowed = ['crop_name','quantity','quantity_unlimited','unit','price_per_unit','price_unit','price_type','city','district','is_nationwide','address','description','harvest_date','product_key','product_family_key','catalog_product_key'];
     const sets = [], params = [];
     for (const key of allowed) {
       if (req.body[key] !== undefined) {

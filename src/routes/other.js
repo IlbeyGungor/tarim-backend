@@ -262,7 +262,8 @@ const usersRouter = require('express').Router();
 const USER_LISTING_SELECT = `
   SELECT
     l.*,
-    GREATEST(l.quantity - l.fulfilled_quantity, 0) AS remaining_quantity,
+    CASE WHEN l.quantity_unlimited THEN 0
+      ELSE GREATEST(l.quantity - l.fulfilled_quantity, 0) END AS remaining_quantity,
     json_build_object(
       'id', u.id, 'name', u.name, 'phone', u.phone,
       'phone_verified', u.phone_verified, 'city', u.city, 'district', u.district,

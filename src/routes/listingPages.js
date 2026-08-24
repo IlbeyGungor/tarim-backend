@@ -7,7 +7,8 @@ const DEFAULT_PRODUCT_IMAGE_BASE =
 const UUID_AT_END = /([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
 
 const PUBLIC_LISTING_SELECT = `
-  SELECT l.*, GREATEST(l.quantity - l.fulfilled_quantity, 0) AS remaining_quantity,
+  SELECT l.*, CASE WHEN l.quantity_unlimited THEN 0
+    ELSE GREATEST(l.quantity - l.fulfilled_quantity, 0) END AS remaining_quantity,
     json_build_object(
       'id', u.id, 'name', u.name, 'city', u.city, 'district', u.district,
       'tc_verified', u.tc_verified, 'cks_verified', u.cks_verified,
@@ -32,7 +33,8 @@ function slugify(value) {
 }
 
 function listingSlug(listing) {
-  const parts = [listing.seller && listing.seller.name, listing.city, listing.district, listing.crop_name]
+  const location = listing.is_nationwide ? 'Türkiye Geneli' : listing.city;
+  const parts = [listing.seller && listing.seller.name, location, listing.district, listing.crop_name]
     .map(slugify).filter(Boolean);
   parts.push(String(listing.id).toLowerCase());
   return parts.join('-');
@@ -162,14 +164,20 @@ function renderNotFound() {
 
 function renderListing(listing) {
   const canonicalUrl = `${SITE_ORIGIN}${listingPath(listing)}`;
-  const locationText = [listing.city, listing.district].filter(Boolean).join(', ') || 'Konum belirtilmedi';
+  const locationText = listing.is_nationwide
+    ? 'Türkiye Geneli'
+    : [listing.city, listing.district].filter(Boolean).join(', ') || 'Konum belirtilmedi';
   const titleText = `${listing.crop_name} İlanı - ${locationText} | Tarım Pazar`;
-  const quantityText = `${formatNumber(listing.remaining_quantity)} ${listing.unit || ''}`.trim();
+  const quantityText = listing.quantity_unlimited
+    ? 'Kısıt yok'
+    : `${formatNumber(listing.remaining_quantity)} ${listing.unit || ''}`.trim();
   const descriptionText = truncate(`${listing.crop_name} ilanı: ${quantityText}, ${locationText}. ${listing.seller.name} tarafından Tarım Pazar'da yayınlandı.`, 160);
   const numericPrice = Number(listing.price_per_unit);
   const hasPrice = Number.isFinite(numericPrice) && numericPrice > 0;
   const priceText = hasPrice ? `${formatCurrency(numericPrice)} / ${listing.price_unit || listing.unit || 'birim'}` : 'Teklif al';
-  const totalValue = hasPrice && listing.unit === listing.price_unit ? numericPrice * Number(listing.remaining_quantity) : null;
+  const totalValue = !listing.quantity_unlimited && hasPrice && listing.unit === listing.price_unit
+    ? numericPrice * Number(listing.remaining_quantity)
+    : null;
   const images = (Array.isArray(listing.image_urls) ? listing.image_urls : []).map((image) => cloudinaryUrl(image, 1400)).filter(Boolean);
   const profileImage = cloudinaryUrl(listing.seller.profile_image, 160);
   const sellerInitial = Array.from(String(listing.seller.name || 'T').trim())[0] || 'T';

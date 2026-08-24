@@ -6,6 +6,7 @@ const authMiddleware = require('../middleware/auth');
 const notify = require('../utils/notify');
 const { recordProductInterest } = require('../services/productInterest');
 const { recordContactEvent } = require('../services/contactAnalytics');
+const { isListingFulfilled } = require('../utils/listingScope');
 
 function sendNotification(type, promise) {
   promise.catch((err) => {
@@ -141,7 +142,8 @@ async function acceptOffer(client, offer) {
     UPDATE listings
     SET fulfilled_quantity=fulfilled_quantity + $2, updated_at=NOW()
     WHERE id=$1 AND status='active'
-    RETURNING *, GREATEST(quantity - fulfilled_quantity, 0) AS remaining_quantity
+    RETURNING *, CASE WHEN quantity_unlimited THEN 0
+      ELSE GREATEST(quantity - fulfilled_quantity, 0) END AS remaining_quantity
   `, [offer.listing_id, offer.quantity]);
   if (!listingRows.length) {
     const error = new Error('Bu ilan artık teklif kabul etmeye uygun değil.');
@@ -151,7 +153,11 @@ async function acceptOffer(client, offer) {
 
   const listing = listingRows[0];
   let autoRejectedOffers = [];
-  const isFulfilled = Number(listing.fulfilled_quantity) >= Number(listing.quantity);
+  const isFulfilled = isListingFulfilled({
+    quantity: listing.quantity,
+    fulfilledQuantity: listing.fulfilled_quantity,
+    quantityUnlimited: listing.quantity_unlimited,
+  });
   if (isFulfilled) {
     await client.query(`
       UPDATE listings
@@ -192,6 +198,7 @@ router.get('/chats', authMiddleware, async (req, res, next) => {
           'crop_name', l.crop_name,
           'city', l.city,
           'district', l.district,
+          'is_nationwide', l.is_nationwide,
           'unit', l.unit,
           'price_unit', l.price_unit,
           'price_per_unit', l.price_per_unit,
@@ -200,8 +207,10 @@ router.get('/chats', authMiddleware, async (req, res, next) => {
           'product_key', l.product_key,
           'product_family_key', l.product_family_key,
           'quantity', l.quantity,
+          'quantity_unlimited', l.quantity_unlimited,
           'fulfilled_quantity', l.fulfilled_quantity,
-          'remaining_quantity', GREATEST(l.quantity - l.fulfilled_quantity, 0),
+          'remaining_quantity', CASE WHEN l.quantity_unlimited THEN 0
+            ELSE GREATEST(l.quantity - l.fulfilled_quantity, 0) END,
           'status', l.status,
           'seller', json_build_object('id', seller.id, 'name', seller.name)
         ) AS listing,
@@ -363,11 +372,14 @@ router.get('/my', authMiddleware, async (req, res, next) => {
     const { rows } = await query(`
       SELECT o.*,
         json_build_object('id',l.id,'crop_name',l.crop_name,'city',l.city,
-          'district',l.district,'unit',l.unit,'price_unit',l.price_unit,'price_per_unit',l.price_per_unit,
+          'district',l.district,'is_nationwide',l.is_nationwide,
+          'unit',l.unit,'price_unit',l.price_unit,'price_per_unit',l.price_per_unit,
           'listing_type',l.listing_type,'category',l.category,
-          'product_key',l.product_key,'product_family_key',l.product_family_key,'quantity',l.quantity,
+          'product_key',l.product_key,'product_family_key',l.product_family_key,
+          'quantity',l.quantity,'quantity_unlimited',l.quantity_unlimited,
           'fulfilled_quantity',l.fulfilled_quantity,
-          'remaining_quantity',GREATEST(l.quantity-l.fulfilled_quantity,0),
+          'remaining_quantity',CASE WHEN l.quantity_unlimited THEN 0
+            ELSE GREATEST(l.quantity-l.fulfilled_quantity,0) END,
           'seller',json_build_object('id',u.id,'name',u.name)) AS listing,
         json_build_object('id',u.id,'name',u.name,'phone',u.phone,'phone_verified',u.phone_verified) AS seller
       FROM offers o
@@ -392,11 +404,15 @@ router.get('/received', authMiddleware, async (req, res, next) => {
   try {
     const { rows } = await query(`
       SELECT o.*,
-        json_build_object('id',l.id,'crop_name',l.crop_name,'city',l.city,'district',l.district,'unit',l.unit,'price_unit',l.price_unit,'price_per_unit',l.price_per_unit,
+        json_build_object('id',l.id,'crop_name',l.crop_name,'city',l.city,
+          'district',l.district,'is_nationwide',l.is_nationwide,
+          'unit',l.unit,'price_unit',l.price_unit,'price_per_unit',l.price_per_unit,
           'listing_type',l.listing_type,'category',l.category,
-          'product_key',l.product_key,'product_family_key',l.product_family_key,'quantity',l.quantity,
+          'product_key',l.product_key,'product_family_key',l.product_family_key,
+          'quantity',l.quantity,'quantity_unlimited',l.quantity_unlimited,
           'fulfilled_quantity',l.fulfilled_quantity,
-          'remaining_quantity',GREATEST(l.quantity-l.fulfilled_quantity,0),
+          'remaining_quantity',CASE WHEN l.quantity_unlimited THEN 0
+            ELSE GREATEST(l.quantity-l.fulfilled_quantity,0) END,
           'seller',json_build_object('id',owner.id,'name',owner.name)) AS listing,
         json_build_object('id',u.id,'name',u.name,'phone',u.phone,'phone_verified',u.phone_verified,'rating',u.rating,'is_verified',u.is_verified) AS buyer
       FROM offers o
@@ -519,15 +535,16 @@ router.post('/', authMiddleware, [
         crop_name: listing.crop_name,
         city: listing.city,
         district: listing.district,
+        is_nationwide: listing.is_nationwide,
         unit: listing.unit,
         price_unit: listing.price_unit,
         price_per_unit: listing.price_per_unit,
         listing_type: listing.listing_type,
         quantity: listing.quantity,
+        quantity_unlimited: listing.quantity_unlimited,
         fulfilled_quantity: listing.fulfilled_quantity,
-        remaining_quantity: Math.max(
-          Number(listing.quantity) - Number(listing.fulfilled_quantity),
-          0
+        remaining_quantity: listing.quantity_unlimited ? 0 : Math.max(
+          Number(listing.quantity) - Number(listing.fulfilled_quantity), 0
         ),
       },
       seller: {
