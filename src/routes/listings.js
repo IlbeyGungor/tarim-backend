@@ -17,6 +17,8 @@ const {
   normalizeListingLocation,
   normalizeListingQuantity,
 } = require('../utils/listingScope');
+const { expireClosedListingPromotion } = require('../services/promotionGrants');
+const { promotionsEnabled } = require('../services/promotionProducts');
 
 function sendNotification(type, promise) {
   promise.catch((err) => {
@@ -28,6 +30,7 @@ function sendNotification(type, promise) {
 const LISTING_SELECT = `
   SELECT
     l.*,
+    (l.promoted_until>NOW()) AS is_promoted,
     CASE WHEN l.quantity_unlimited THEN 0
       ELSE GREATEST(l.quantity - l.fulfilled_quantity, 0) END AS remaining_quantity,
     json_build_object(
@@ -40,6 +43,29 @@ const LISTING_SELECT = `
   FROM listings l
   JOIN users u ON u.id = l.seller_id
 `;
+
+const PROMOTION_SORTS = Object.freeze({
+  price_asc: `CASE WHEN base.price_per_unit IS NULL THEN NULL
+    WHEN LOWER(base.price_unit)='ton' THEN base.price_per_unit/1000.0
+    ELSE base.price_per_unit END ASC NULLS LAST,base.created_at DESC`,
+  price_desc: `CASE WHEN base.price_per_unit IS NULL THEN NULL
+    WHEN LOWER(base.price_unit)='ton' THEN base.price_per_unit/1000.0
+    ELSE base.price_per_unit END DESC NULLS LAST,base.created_at DESC`,
+  quantity_asc: `CASE WHEN base.quantity_unlimited THEN NULL
+    WHEN LOWER(base.unit) IN ('kg','kilogram') THEN base.quantity/1000.0
+    ELSE base.quantity END ASC NULLS LAST,base.created_at DESC`,
+  quantity_desc: `CASE WHEN base.quantity_unlimited THEN NULL
+    WHEN LOWER(base.unit) IN ('kg','kilogram') THEN base.quantity/1000.0
+    ELSE base.quantity END DESC NULLS LAST,base.created_at DESC`,
+  created_asc: 'base.created_at ASC NULLS LAST',
+  created_desc: 'base.created_at DESC NULLS LAST',
+  harvest_asc: 'base.harvest_date ASC NULLS LAST,base.created_at DESC',
+  harvest_desc: 'base.harvest_date DESC NULLS LAST,base.created_at DESC',
+});
+
+function promotionSortSql(value) {
+  return PROMOTION_SORTS[value] || PROMOTION_SORTS.created_desc;
+}
 
 async function fetchFullListing(id) {
   const { rows } = await query(`${LISTING_SELECT} WHERE l.id=$1`, [id]);
@@ -61,6 +87,7 @@ const reportLimiter = rateLimit({
 router.get('/', authMiddleware.optional, async (req, res, next) => {
   try {
     const { search, category, city, listing_type, status, page = 1, limit = 20 } = req.query;
+    const promotionsRequested = req.query.promotions === '1' && promotionsEnabled();
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const params = [];
     const conditions = ["l.status = 'active'", "u.account_status = 'active'"];
@@ -100,15 +127,48 @@ router.get('/', authMiddleware.optional, async (req, res, next) => {
     }
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-    params.push(parseInt(limit), offset);
-
-    const { rows } = await query(
-      `${LISTING_SELECT} ${where} ORDER BY l.created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
-      params
-    );
+    const countParams = [...params];
+    let rows;
+    if (promotionsRequested) {
+      const dataParams = [...params, parseInt(limit), offset];
+      const result = await query(`
+        WITH eligible_promotions AS (
+          SELECT l.id,
+                 ROW_NUMBER() OVER (
+                   ORDER BY md5(l.id::text || '|' || to_char(
+                     date_trunc('hour',NOW() AT TIME ZONE 'Europe/Istanbul'),
+                     'YYYY-MM-DD HH24'
+                   ))
+                 ) AS rotation_rank
+          FROM listings l
+          JOIN users u ON u.id=l.seller_id
+          ${where}
+            AND l.promoted_until>NOW()
+        ), featured AS (
+          SELECT id FROM eligible_promotions WHERE rotation_rank<=3
+        ), base AS (
+          ${LISTING_SELECT} ${where}
+        )
+        SELECT base.*,(featured.id IS NOT NULL) AS is_featured_slot
+        FROM base
+        LEFT JOIN featured ON featured.id=base.id
+        ORDER BY
+          CASE WHEN featured.id IS NOT NULL THEN 0 ELSE 1 END,
+          CASE WHEN featured.id IS NOT NULL THEN base.promoted_ranked_at END DESC NULLS LAST,
+          ${promotionSortSql(req.query.sort)}
+        LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}
+      `, dataParams);
+      rows = result.rows;
+    } else {
+      const dataParams = [...params, parseInt(limit), offset];
+      const result = await query(
+        `${LISTING_SELECT} ${where} ORDER BY l.created_at DESC LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
+        dataParams,
+      );
+      rows = result.rows.map((row) => ({ ...row, is_featured_slot: false }));
+    }
 
     // Total count for pagination
-    const countParams = params.slice(0, params.length - 2);
     const { rows: countRows } = await query(
       `SELECT COUNT(*) FROM listings l JOIN users u ON u.id=l.seller_id ${where}`,
       countParams
@@ -408,6 +468,7 @@ router.post('/:id/close', authMiddleware, async (req, res, next) => {
       RETURNING *, CASE WHEN quantity_unlimited THEN 0
         ELSE GREATEST(quantity - fulfilled_quantity, 0) END AS remaining_quantity
     `, [req.params.id]);
+    await expireClosedListingPromotion(req.params.id, client);
     await client.query('COMMIT');
 
     rejectedOffers.forEach((offer) => {
@@ -519,9 +580,11 @@ router.delete('/:id', authMiddleware, async (req, res, next) => {
     const { rows } = await query('SELECT seller_id FROM listings WHERE id=$1', [req.params.id]);
     if (!rows.length) return res.status(404).json({ error: 'İlan bulunamadı.' });
     if (rows[0].seller_id !== req.user.id) return res.status(403).json({ error: 'Yetki yok.' });
+    await expireClosedListingPromotion(req.params.id);
     await query('DELETE FROM listings WHERE id=$1', [req.params.id]);
     res.json({ message: 'İlan silindi.' });
   } catch (err) { next(err); }
 });
 
 module.exports = router;
+router.testHelpers = { promotionSortSql };

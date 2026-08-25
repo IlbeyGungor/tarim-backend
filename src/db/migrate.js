@@ -167,6 +167,8 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS catalog_product_key VARCHAR(160)`);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS match_revision INTEGER NOT NULL DEFAULT 1`);
     await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS price_unit VARCHAR(20)`);
+    await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS promoted_until TIMESTAMPTZ`);
+    await client.query(`ALTER TABLE listings ADD COLUMN IF NOT EXISTS promoted_ranked_at TIMESTAMPTZ`);
     await client.query(`UPDATE listings SET price_unit=unit WHERE price_unit IS NULL OR BTRIM(price_unit)=''`);
     await client.query(`ALTER TABLE listings ALTER COLUMN price_unit SET DEFAULT 'kg'`);
     await client.query(`ALTER TABLE listings ALTER COLUMN price_unit SET NOT NULL`);
@@ -472,6 +474,65 @@ console.log('DB INFO:', dbInfo.rows[0]);
         created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS promotion_purchase_intents (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        listing_id UUID REFERENCES listings(id) ON DELETE SET NULL,
+        product_id VARCHAR(80) NOT NULL,
+        platform VARCHAR(20) NOT NULL CHECK (platform IN ('ios','android')),
+        status VARCHAR(24) NOT NULL DEFAULT 'created'
+          CHECK (status IN ('created','pending','verified','completed','credited','failed','cancelled')),
+        expires_at TIMESTAMPTZ NOT NULL,
+        completed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS store_purchases (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        intent_id UUID REFERENCES promotion_purchase_intents(id) ON DELETE SET NULL,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        listing_id UUID REFERENCES listings(id) ON DELETE SET NULL,
+        platform VARCHAR(20) NOT NULL CHECK (platform IN ('ios','android')),
+        product_id VARCHAR(80) NOT NULL,
+        transaction_key VARCHAR(255) NOT NULL,
+        order_id VARCHAR(255),
+        environment VARCHAR(30),
+        status VARCHAR(24) NOT NULL
+          CHECK (status IN ('pending','verified','revoked','failed')),
+        consumption_status VARCHAR(24) NOT NULL DEFAULT 'not_required'
+          CHECK (consumption_status IN ('not_required','pending','consumed','failed')),
+        configured_gross_amount NUMERIC(12,2),
+        currency CHAR(3),
+        verified_at TIMESTAMPTZ,
+        revoked_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(platform,transaction_key)
+      )
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS promotion_grants (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        purchase_id UUID NOT NULL UNIQUE REFERENCES store_purchases(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        listing_id UUID REFERENCES listings(id) ON DELETE SET NULL,
+        duration_days INTEGER NOT NULL CHECK (duration_days IN (1,3,7)),
+        status VARCHAR(24) NOT NULL
+          CHECK (status IN ('active','credit','revoked','ended')),
+        applied_at TIMESTAMPTZ,
+        starts_at TIMESTAMPTZ,
+        ends_at TIMESTAMPTZ,
+        revoked_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`ALTER TABLE promotion_grants ADD COLUMN IF NOT EXISTS starts_at TIMESTAMPTZ`);
+    await client.query(`ALTER TABLE promotion_grants ADD COLUMN IF NOT EXISTS ends_at TIMESTAMPTZ`);
     await client.query(`
       INSERT INTO contact_events (
         event_id,channel,actor_user_id,recipient_user_id,listing_id,offer_id,
@@ -754,6 +815,11 @@ console.log('DB INFO:', dbInfo.rows[0]);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_users_last_active ON users(last_active_at DESC)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_user_activity_date ON user_activity_daily(activity_date DESC)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_contact_events_created ON contact_events(created_at DESC)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_listings_promoted_active ON listings(promoted_until DESC,promoted_ranked_at DESC) WHERE status='active' AND promoted_until IS NOT NULL`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_promotion_intents_user_created ON promotion_purchase_intents(user_id,created_at DESC)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_store_purchases_user_created ON store_purchases(user_id,created_at DESC)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_store_purchases_status ON store_purchases(status,updated_at DESC)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_promotion_grants_user_status ON promotion_grants(user_id,status,created_at DESC)`);
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_contact_events_contact_created
       ON contact_events(contact_key,channel,created_at DESC)

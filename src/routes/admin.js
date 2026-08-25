@@ -9,6 +9,7 @@ const {
   normalizeAnalyticsDays,
 } = require('../services/userActivity');
 const { fetchAdminAnalyticsSummary } = require('../services/adminAnalytics');
+const { expireClosedListingPromotion } = require('../services/promotionGrants');
 
 router.use(authMiddleware, adminMiddleware);
 
@@ -128,6 +129,73 @@ router.get('/analytics/products', async (req, res, next) => {
     `, [days]);
     res.json({ days, products: rows });
   } catch (err) { next(err); }
+});
+
+router.get('/promotions/summary', async (req, res, next) => {
+  try {
+    const days = normalizeAnalyticsDays(req.query.days);
+    const { rows } = await query(`
+      SELECT
+        COUNT(*) FILTER (WHERE sp.created_at>=NOW()-($1::int*INTERVAL '1 day'))::int AS purchases,
+        COUNT(*) FILTER (WHERE sp.status='verified' AND sp.created_at>=NOW()-($1::int*INTERVAL '1 day'))::int AS verified_purchases,
+        COUNT(*) FILTER (WHERE sp.status='revoked' AND sp.created_at>=NOW()-($1::int*INTERVAL '1 day'))::int AS revoked_purchases,
+        COALESCE(SUM(sp.configured_gross_amount) FILTER (
+          WHERE sp.status='verified' AND sp.created_at>=NOW()-($1::int*INTERVAL '1 day')
+        ),0)::numeric AS configured_gross_try,
+        (SELECT COUNT(*)::int FROM listings WHERE status='active' AND promoted_until>NOW()) AS active_promotions,
+        (SELECT COUNT(*)::int FROM promotion_grants WHERE status='credit') AS available_credits
+      FROM store_purchases sp
+    `, [days]);
+    const byPlatform = await query(`
+      SELECT platform,product_id,status,COUNT(*)::int AS count
+      FROM store_purchases
+      WHERE created_at>=NOW()-($1::int*INTERVAL '1 day')
+      GROUP BY platform,product_id,status
+      ORDER BY platform,product_id,status
+    `, [days]);
+    res.json({ days, summary: rows[0], breakdown: byPlatform.rows });
+  } catch (error) { next(error); }
+});
+
+router.get('/promotions/purchases', async (req, res, next) => {
+  try {
+    const { page, limit, offset } = paging(req);
+    const params = [];
+    const where = [];
+    const platform = String(req.query.platform || '').trim();
+    const status = String(req.query.status || '').trim();
+    if (platform) {
+      if (!['ios', 'android'].includes(platform)) return res.status(400).json({ error: 'Geçersiz platform.' });
+      params.push(platform); where.push(`sp.platform=$${params.length}`);
+    }
+    if (status) {
+      if (!['pending', 'verified', 'revoked', 'failed'].includes(status)) return res.status(400).json({ error: 'Geçersiz durum.' });
+      params.push(status); where.push(`sp.status=$${params.length}`);
+    }
+    const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const countParams = [...params];
+    params.push(limit, offset);
+    const [result, countResult] = await Promise.all([
+      query(`
+        SELECT sp.id,sp.platform,sp.product_id,sp.status,sp.environment,
+               sp.configured_gross_amount,sp.currency,sp.verified_at,sp.revoked_at,sp.created_at,
+               u.id AS user_id,u.name AS user_name,u.email AS user_email,
+               l.id AS listing_id,l.crop_name,
+               CASE WHEN pg.status='active' AND pg.ends_at<=NOW()
+                 THEN 'ended' ELSE pg.status END AS grant_status,
+               pg.duration_days
+        FROM store_purchases sp
+        JOIN users u ON u.id=sp.user_id
+        LEFT JOIN listings l ON l.id=sp.listing_id
+        LEFT JOIN promotion_grants pg ON pg.purchase_id=sp.id
+        ${clause}
+        ORDER BY sp.created_at DESC
+        LIMIT $${params.length-1} OFFSET $${params.length}
+      `, params),
+      query(`SELECT COUNT(*)::int AS count FROM store_purchases sp ${clause}`, countParams),
+    ]);
+    res.json({ purchases: result.rows, total: countResult.rows[0].count, page, limit });
+  } catch (error) { next(error); }
 });
 
 router.get('/listings', async (req, res, next) => {
@@ -291,6 +359,7 @@ router.delete('/listings/:id', [
         status: listing.status, created_at: listing.created_at,
       },
     });
+    await expireClosedListingPromotion(listing.id, client);
     await client.query('DELETE FROM listings WHERE id=$1', [listing.id]);
     await client.query('COMMIT');
     res.json({ message: 'İlan ve bağlı teklif/mesaj kayıtları silindi.' });
