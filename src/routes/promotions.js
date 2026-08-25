@@ -21,6 +21,7 @@ const {
   applyPromotionCredit,
   revokePurchaseByTransaction,
 } = require('../services/promotionGrants');
+const { withListingShareUrls } = require('./listingPages');
 
 function errorResponse(res, error) {
   const status = error.status || (error.code === 'STORE_NOT_CONFIGURED' ? 503 : 400);
@@ -43,7 +44,7 @@ router.get('/me', async (req, res, next) => {
   try {
     const [listingsResult, grantsResult] = await Promise.all([
       query(`
-        SELECT id,crop_name,listing_type,status,image_urls,default_image_url,
+        SELECT id,crop_name,listing_type,status,image_urls,
                promoted_until,promoted_ranked_at,
                (promoted_until>NOW()) AS is_promoted
         FROM listings
@@ -61,7 +62,11 @@ router.get('/me', async (req, res, next) => {
         ORDER BY pg.created_at DESC
       `, [req.user.id]),
     ]);
-    res.json({ enabled: promotionsEnabled(), listings: listingsResult.rows, grants: grantsResult.rows });
+    res.json({
+      enabled: promotionsEnabled(),
+      listings: withListingShareUrls(listingsResult.rows),
+      grants: grantsResult.rows,
+    });
   } catch (error) { next(error); }
 });
 
